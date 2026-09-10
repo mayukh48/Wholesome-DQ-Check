@@ -53,6 +53,16 @@ checks:
     severity: warning
     threshold: 0.999                   # a rare fat-fingered entry shouldn't halt the pipeline, just get flagged
 
+  - name: currency_is_uniform
+    type: uniform_value
+    column: currency
+    allowed_values: [USD]    # every row in this feed is expected to be USD - omit allowed_values to just detect a split
+    severity: critical
+    threshold: 1.0
+    # Catches "same metric reported in different units within the same
+    # dataset" - a store accidentally sending amounts in a different
+    # currency without anyone noticing until totals stopped adding up.
+
   - name: expected_columns_present
     type: schema
     expected_schema:
@@ -62,6 +72,7 @@ checks:
       amount: double
       quantity: double
       unit_price: double
+      currency: string
       status: string
       created_at: timestamp
     severity: critical

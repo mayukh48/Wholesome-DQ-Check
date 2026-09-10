@@ -459,3 +459,123 @@ def test_outlier_passes_when_no_baseline_variance(spark):
     result = _run(spark, df, check)
 
     assert result["status"] == "PASS"
+
+
+def test_accuracy_value_map_translates_before_comparing(spark):
+    df = spark.createDataFrame([("C1", "Y"), ("C2", "N")], ["customer_id", "is_active"])
+    ref_df = spark.createDataFrame([("C1", 1), ("C2", 0)], ["customer_id", "active_flag"])
+    check = CheckDefinition(
+        name="is_active_matches_crm",
+        type="accuracy",
+        column="customer_id",
+        match_column="is_active",
+        ref_dataset="crm",
+        ref_match_column="active_flag",
+        value_map={"Y": 1, "N": 0},
+        threshold=1.0,
+    )
+    result = _run(spark, df, check, ref_dfs={"crm": ref_df})
+
+    assert result["status"] == "PASS"
+
+
+def test_accuracy_value_map_flags_real_mismatch(spark):
+    df = spark.createDataFrame([("C1", "Y"), ("C2", "N")], ["customer_id", "is_active"])
+    ref_df = spark.createDataFrame([("C1", 0), ("C2", 0)], ["customer_id", "active_flag"])  # C1 disagrees
+    check = CheckDefinition(
+        name="is_active_matches_crm",
+        type="accuracy",
+        column="customer_id",
+        match_column="is_active",
+        ref_dataset="crm",
+        ref_match_column="active_flag",
+        value_map={"Y": 1, "N": 0},
+        threshold=1.0,
+    )
+    result = _run(spark, df, check, ref_dfs={"crm": ref_df})
+
+    assert result["status"] == "FAIL"
+    assert result["failed_rows"] == 1
+
+
+def test_scd_overlap_flags_overlapping_effective_ranges(spark):
+    df = spark.createDataFrame(
+        [
+            ("E1", date(2024, 1, 1), date(2024, 6, 1)),
+            ("E1", date(2024, 3, 1), None),  # overlaps E1's first row
+            ("E2", date(2024, 1, 1), date(2024, 6, 1)),
+            ("E2", date(2024, 6, 1), None),  # starts exactly when E2's first row ends - no overlap
+        ],
+        ["entity_id", "valid_from", "valid_to"],
+    )
+    check = CheckDefinition(
+        name="no_overlapping_customer_versions",
+        type="scd_overlap",
+        columns=["entity_id"],
+        start_column="valid_from",
+        end_column="valid_to",
+        threshold=1.0,
+    )
+    result = _run(spark, df, check)
+
+    assert result["status"] == "FAIL"
+    assert result["failed_rows"] == 1  # only E1 has an overlap
+    assert result["total_rows"] == 2  # 2 distinct entities total
+
+
+def test_scd_overlap_passes_with_clean_ranges(spark):
+    df = spark.createDataFrame(
+        [
+            ("E2", date(2024, 1, 1), date(2024, 6, 1)),
+            ("E2", date(2024, 6, 1), None),
+        ],
+        ["entity_id", "valid_from", "valid_to"],
+    )
+    check = CheckDefinition(
+        name="no_overlapping_customer_versions",
+        type="scd_overlap",
+        columns=["entity_id"],
+        start_column="valid_from",
+        end_column="valid_to",
+        threshold=1.0,
+    )
+    result = _run(spark, df, check)
+
+    assert result["status"] == "PASS"
+
+
+def test_uniform_value_flags_mixed_currencies(spark):
+    df = spark.createDataFrame([(1, "USD"), (2, "USD"), (3, "EUR")], ["id", "currency"])
+    check = CheckDefinition(
+        name="currency_is_uniform", type="uniform_value", column="currency", threshold=1.0
+    )
+    result = _run(spark, df, check)
+
+    assert result["status"] == "FAIL"
+    assert result["failed_rows"] == 1  # the one EUR row disagrees with the majority (USD)
+    assert result["total_rows"] == 3
+
+
+def test_uniform_value_passes_when_all_same(spark):
+    df = spark.createDataFrame([(1, "USD"), (2, "USD")], ["id", "currency"])
+    check = CheckDefinition(
+        name="currency_is_uniform", type="uniform_value", column="currency", threshold=1.0
+    )
+    result = _run(spark, df, check)
+
+    assert result["status"] == "PASS"
+
+
+def test_uniform_value_with_explicit_expected_value(spark):
+    df = spark.createDataFrame([(1, "USD"), (2, "EUR")], ["id", "currency"])
+    check = CheckDefinition(
+        name="currency_is_usd",
+        type="uniform_value",
+        column="currency",
+        allowed_values=["USD"],
+        threshold=1.0,
+    )
+    result = _run(spark, df, check)
+
+    assert result["status"] == "FAIL"
+    assert result["failed_rows"] == 1

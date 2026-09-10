@@ -1,11 +1,13 @@
 # Example config for a SILVER-layer table.
 # Silver is cleaned/conformed data, so we tighten checks: enforce uniqueness
 # of the primary key, validate value ranges/formats, check a foreign key
-# (country_code) against a reference dataset, and reconcile row counts
-# against the raw bronze load to catch silent drops during cleansing. Some
-# checks are "warning" severity - they get recorded and are visible on a
-# dashboard, but a small rate of bad values won't halt the pipeline;
-# "critical" checks will.
+# (country_code) against a reference dataset, reconcile row counts against
+# the raw bronze load, cross-check status against a second system (CRM) on
+# a different coding scheme, and make sure this customer's SCD Type 2
+# version history never has two overlapping "current" rows. Some checks are
+# "warning" severity - they get recorded and are visible on a dashboard,
+# but a small rate of bad values won't halt the pipeline; "critical" checks
+# will.
 
 dataset: customers
 layer: silver
@@ -87,3 +89,29 @@ checks:
     # master; this proves the region this customer was mapped to for that
     # country_code is actually *correct* - catches "depot mapped to wrong
     # state"-style errors that referential_integrity alone can't see.
+
+  - name: is_active_matches_crm
+    type: accuracy
+    column: customer_id
+    match_column: status           # this table stores ACTIVE/INACTIVE
+    ref_dataset: crm               # must match a key passed in --ref-table / ref_dfs
+    ref_match_column: active_flag  # the CRM stores 1/0 for the same fact
+    value_map: {ACTIVE: 1, INACTIVE: 0, PENDING: 0}
+    severity: critical
+    threshold: 1.0
+    # Two systems, two coding schemes, same underlying fact - value_map
+    # translates this side before comparing so "ACTIVE" vs 1 isn't a false
+    # mismatch. Catches "customer status = Active in CRM but Closed in
+    # Billing"-style drift once the two are on a common scale.
+
+  - name: no_customer_version_overlap
+    type: scd_overlap
+    columns: [customer_id]       # entity key
+    start_column: valid_from
+    end_column: valid_to           # NULL means "still the current version"
+    severity: critical
+    threshold: 1.0
+    # Catches an SCD Type 2 merge defect: two versions of the same customer
+    # both claiming to be valid at the same point in time. uniqueness alone
+    # can't see this - it only catches an exact duplicate key, not two
+    # overlapping date *ranges*.

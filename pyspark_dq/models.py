@@ -28,6 +28,8 @@ VALID_CHECK_TYPES = (
     "stale_record",
     "derived_field",
     "outlier",
+    "scd_overlap",
+    "uniform_value",
 )
 
 
@@ -59,6 +61,9 @@ class CheckDefinition:
     frequency: Optional[str] = None
     abs_tolerance: Optional[float] = None
     num_std_dev: Optional[float] = None
+    start_column: Optional[str] = None
+    end_column: Optional[str] = None
+    value_map: Optional[Dict[Any, Any]] = None
 
     def __post_init__(self) -> None:
         if self.type not in VALID_CHECK_TYPES:

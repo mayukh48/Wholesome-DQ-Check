@@ -9,6 +9,13 @@ This is the DQ Framework doc's "Accuracy" dimension (values correctly
 reflect reality), which `referential_integrity` alone doesn't cover: proving
 a foreign key exists is not the same as proving the row's other attributes
 are correct for that key.
+
+Set `value_map` when the two systems use different code schemes for the
+same fact - e.g. this dataset stores "Y"/"N" but the reference stores
+1/0 - so "the same concept, different coding" isn't flagged as a false
+mismatch. A raw value with no entry in `value_map` is treated as a mismatch
+(an unrecognized code is itself an accuracy problem worth surfacing, not
+something to silently skip).
 """
 from __future__ import annotations
 
@@ -45,8 +52,25 @@ def evaluate(
     ).distinct()
     joined = left.join(right, on=check.column, how="inner")
 
+    raw_value = F.col(check.match_column)
+    if check.value_map:
+        map_items = []
+        for k, v in check.value_map.items():
+            map_items.append(F.lit(k))
+            map_items.append(F.lit(v))
+        mapping = F.create_map(*map_items)
+        mapped_value = mapping[raw_value]
+        # A null match_column is completeness's job, not this check's - skip
+        # it. But a *non-null* raw value with no entry in value_map is a
+        # genuine mismatch: an unrecognized code, not a translation gap.
+        mismatch_condition = raw_value.isNotNull() & (
+            mapped_value.isNull() | (mapped_value != F.col("_dq_ref_value"))
+        )
+    else:
+        mismatch_condition = raw_value.isNotNull() & (raw_value != F.col("_dq_ref_value"))
+
     total = joined.count()
-    mismatched = joined.filter(F.col(check.match_column) != F.col("_dq_ref_value")).count()
+    mismatched = joined.filter(mismatch_condition).count()
     pass_rate = 1.0 if total == 0 else (total - mismatched) / total
     ok = pass_rate >= check.threshold
     return CheckOutcome(

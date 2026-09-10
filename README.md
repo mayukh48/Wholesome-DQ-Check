@@ -228,6 +228,10 @@ duplicates.
   severity: warning
   threshold: 1.0
 ```
+Paired with `completeness` on a grain-discriminator column (e.g. `period_type:
+DAILY|MONTHLY`), this also catches "inconsistent grain" - a table silently
+mixing daily and monthly rows - by making sure every row is explicitly
+tagged with a valid grain instead of leaving it to guesswork.
 
 **`regex`** - a column's non-null values must match a pattern.
 
@@ -267,7 +271,10 @@ open-ended escape hatch for business rules that don't fit another type.
   severity: critical
   threshold: 1.0
 ```
-Catches: e.g. a market-share report accidentally including last month's rows.
+Catches: e.g. a market-share report accidentally including last month's
+rows, or a same-row ordering rule like `ship_date >= order_date` -
+"cross-field inconsistency" where two columns on the same row logically
+contradict each other.
 
 ### Accuracy — values correctly reflect reality
 
@@ -306,6 +313,27 @@ just linked to the wrong state. Also covers "wrong data source mapped" and
 "incorrect classification" - anywhere a value was populated from the wrong
 place - and, pointed at an FX-rate reference table, "using a stale exchange
 rate for a currency conversion."
+
+Set `value_map` when the two systems use different code schemes for the
+same fact:
+
+```yaml
+- name: is_active_matches_crm
+  type: accuracy
+  column: customer_id
+  match_column: status            # this table stores ACTIVE/INACTIVE
+  ref_dataset: crm
+  ref_match_column: active_flag    # the CRM stores 1/0 for the same fact
+  value_map: {ACTIVE: 1, INACTIVE: 0, PENDING: 0}
+  severity: critical
+  threshold: 1.0
+```
+Catches: "customer status = Active in CRM but Closed in Billing" where the
+two systems don't even agree on how to *spell* active/closed - `value_map`
+translates this side's raw value before comparing, so "ACTIVE" vs. `1`
+isn't a false mismatch. A raw value with no entry in `value_map` still
+counts as a mismatch (an unrecognized code is itself worth flagging, not
+something to silently skip).
 
 **`stale_record`** - `column`'s own value must be within `max_age_hours` of
 now, evaluated per row - not just the dataset's most recent value.
@@ -389,7 +417,10 @@ dimensions, must match a reference dataset per group.
   threshold: 1.0              # fraction of groups that must be within tolerance to pass overall
 ```
 Catches: "raw vs. YTD sub-segment mismatch" - the region-level totals in a
-downstream aggregate silently drifted from the source.
+downstream aggregate silently drifted from the source. Grouping by a period
+column (e.g. `columns: [month]`) also catches "monthly total != sum of
+daily totals due to differing aggregation rules" - group the daily table by
+month and compare against the monthly table's own totals.
 
 **`immutability`** - fingerprint the dataset (or, usually, a historical
 slice of it via `filter_expression`) and compare against the fingerprint
@@ -405,6 +436,43 @@ recorded for this check in the last run.
 Catches: someone silently re-ran a pipeline over a past month and changed
 numbers that should have been frozen - current-period rows are expected to
 change and are excluded by `filter_expression`, so they never trip this.
+
+**`scd_overlap`** - no two rows for the same entity (`columns`) may have
+overlapping `[start_column, end_column)` validity windows. A `NULL`
+`end_column` means "still the current version."
+
+```yaml
+- name: no_customer_version_overlap
+  type: scd_overlap
+  columns: [customer_id]     # entity key
+  start_column: valid_from
+  end_column: valid_to
+  severity: critical
+  threshold: 1.0
+```
+Catches: the classic SCD Type 2 defect - "same entity has conflicting
+states at the same timestamp" because a merge produced two concurrently-
+"current" versions. `uniqueness` can't see this: it only catches two rows
+sharing the exact same key, not two rows whose *date ranges* overlap
+without ever sharing one identical value.
+
+**`uniform_value`** - a column's non-null values must all be the same - no
+silently mixed units/currencies/codes within one dataset.
+
+```yaml
+- name: currency_is_uniform
+  type: uniform_value
+  column: currency
+  allowed_values: [USD]   # pin the expected value explicitly - omit to just detect a split via majority vote
+  severity: critical
+  threshold: 1.0
+```
+Catches: "same metric reported in different units within the same
+dataset" - a currency column quietly mixing USD and EUR, or a weight column
+mixing kg and lbs. Unlike `value_set`, no pre-known allow-list is required:
+omit `allowed_values` and the majority value becomes the baseline, so a
+split still gets flagged even without knowing in advance which value is
+"correct."
 
 ### Timeliness — data arrives and refreshes within SLA
 
@@ -527,18 +595,20 @@ it above; unused fields are just left `None`.
 | Field | Type | Used by |
 |---|---|---|
 | `name` | str (required) | all - must be unique within a config |
-| `type` | str (required) | all - one of the 21 types above |
+| `type` | str (required) | all - one of the 23 types above |
 | `severity` | `"critical"` \| `"warning"` (default `"warning"`) | all |
 | `threshold` | float 0.0-1.0 (default `1.0`) | all |
-| `column` | str | completeness, sentinel_value, coverage, period_gap, stale_record, derived_field, outlier, uniqueness, range, value_set, regex, referential_integrity, accuracy, reconciliation, cross_dataset_consistency, anomaly |
-| `columns` | list[str] | uniqueness (composite key), cross_dataset_consistency (group-by), immutability (fingerprint columns) |
+| `column` | str | completeness, sentinel_value, coverage, period_gap, stale_record, derived_field, outlier, uniform_value, uniqueness, range, value_set, regex, referential_integrity, accuracy, reconciliation, cross_dataset_consistency, anomaly |
+| `columns` | list[str] | uniqueness (composite key), cross_dataset_consistency (group-by), immutability (fingerprint columns), scd_overlap (entity key) |
 | `treat_blank_as_null` | bool (default `false`) | completeness |
 | `disallowed_values` | list | sentinel_value |
 | `frequency` | `"day"` \| `"month"` \| `"year"` (default `"day"`) | period_gap |
 | `abs_tolerance` | float ≥ 0 (default `0.0`) | derived_field |
 | `num_std_dev` | float > 0 (default `3.0`) | outlier |
+| `start_column` / `end_column` | str | scd_overlap (both required; `end_column` may be `NULL` per row = "still current") |
+| `value_map` | dict | accuracy (translates this side's raw value before comparing) |
 | `min` / `max` | float | range, row_count |
-| `allowed_values` | list | value_set |
+| `allowed_values` | list | value_set, uniform_value (optional - a single value to pin the expected baseline) |
 | `pattern` | str | regex |
 | `expression` | str | expression, derived_field (the formula `column` should equal) |
 | `ref_dataset` | str | referential_integrity, accuracy, reconciliation, cross_dataset_consistency, coverage |
@@ -727,7 +797,7 @@ import pytest
 pytest.main(["-v", f"{PKG_ROOT}/tests/test_checks.py"])
 ```
 
-This has been run end-to-end on this workspace's serverless compute (26/26
+This has been run end-to-end on this workspace's serverless compute (33/33
 passing, covering every check type added on top of the original nine plus
 `filter_expression` and `treat_blank_as_null`). The `spark` fixture in
 `tests/conftest.py` detects when it's running inside
@@ -778,5 +848,7 @@ package - included here so they don't get rediscovered:
 | `reconciliation` | Consistency | count/sum matches reference dataset | ✅ | |
 | `cross_dataset_consistency` | Consistency | per-group sum matches reference dataset | ✅ | |
 | `immutability` | Consistency | historical data unchanged since last run | | ✅ |
+| `scd_overlap` | Consistency | no two entity versions have overlapping date ranges | | |
+| `uniform_value` | Consistency | column doesn't silently mix values (units/codes) | | |
 | `freshness` | Timeliness | latest timestamp isn't stale | | |
 | `anomaly` | Timeliness / Volume | metric isn't a big swing vs. history | | ✅ |

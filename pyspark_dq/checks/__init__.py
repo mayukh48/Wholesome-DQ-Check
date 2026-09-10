@@ -31,9 +31,11 @@ from . import (
     referential_integrity,
     regex as regex_check,
     row_count,
+    scd_overlap,
     schema as schema_check,
     sentinel_value,
     stale_record,
+    uniform_value,
     uniqueness,
     value_set,
 )
@@ -65,6 +67,8 @@ DATASET_LEVEL_CHECKS = {
     "immutability": immutability,
     "coverage": coverage,
     "period_gap": period_gap,
+    "scd_overlap": scd_overlap,
+    "uniform_value": uniform_value,
 }
 
 ROW_LEVEL_TYPES = set(ROW_LEVEL_CHECKS)
@@ -89,8 +93,10 @@ __all__ = [
     "reconciliation",
     "referential_integrity",
     "row_count",
+    "scd_overlap",
     "sentinel_value",
     "stale_record",
+    "uniform_value",
     "uniqueness",
     "value_set",
 ]
