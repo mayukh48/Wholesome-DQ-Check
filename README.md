@@ -210,6 +210,14 @@ duplicates. Set `trim_whitespace: true` to also catch "whitespace/trailing
 space issues" - `" John "` and `"John"` otherwise compare as distinct keys,
 silently hiding a real duplicate from detection.
 
+Run against the "one" side of a join *before* that join happens, this is
+also the root-cause fix for "fan-out/fan-in errors in joins": unintended
+row multiplication (or loss) from an unexpectedly non-unique join key. A
+`uniqueness` check on `customers.customer_id` prevents the surprise;
+`reconciliation` (Consistency, below) on the joined output's row count
+catches it after the fact if it happens anyway - the two are complementary,
+not alternatives.
+
 **`fuzzy_duplicate`** - flags rows whose `column` is a near-match (edit
 distance ≤ `max_edit_distance`, default 2) of another row's, not just an
 exact one. Pass `columns` as a blocking key to scope the comparison instead
@@ -596,11 +604,19 @@ idempotency guard.
   threshold: 0.99                # allow up to 1% row loss between raw and cleansed, e.g. from dedup
 ```
 Catches: rows silently dropped (or duplicated) between two stages of the
-pipeline - "raw vs. processed record counts don't match," "duplicate due to
-reprocessing" (a pipeline re-run without idempotency double-counting rows)
-when `ref_dataset` points at an "already loaded batches" marker, and
-"real-time vs. batch latency mismatch" causing reconciliation gaps when
-`ref_dataset` points at the other layer (streaming vs. batch).
+pipeline - "row count mismatch" (source has 10,000 rows, target loaded only
+9,850), "duplicate due to reprocessing" (a pipeline re-run without
+idempotency double-counting rows) when `ref_dataset` points at an "already
+loaded batches" marker, and "real-time vs. batch latency mismatch" causing
+reconciliation gaps when `ref_dataset` points at the other layer (streaming
+vs. batch). With `column` set, the same check becomes a "control total
+mismatch" check - the sum of a financial column in the source should equal
+the sum in the target, not just the row count. Chained across layers (bronze
+vs. silver, silver vs. gold, one `reconciliation` check per hop) this is
+also the direct fix for "reconciliation break between layers" not tying
+out, and pointed at a pre- vs. post-transformation dataset, for "data loss
+during transformation" (a filter/dedup step unintentionally dropping valid
+rows) or "data loss during transmission" (a truncated file transfer).
 
 **`cross_dataset_consistency`** - a summed column, grouped by one or more
 dimensions, must match a reference dataset per group.
@@ -730,8 +746,11 @@ Gate 3).
   severity: warning
 ```
 Catches: "industry numbers shifted after refresh" / a market-share figure
-that doubled overnight. Passes automatically until enough run history has
-accumulated - a brand-new dataset never false-fails on day one.
+that doubled overnight, and "sudden volume spike/drop" - a daily load that
+deviates significantly from the historical pattern, whether or not it also
+fails a `reconciliation` check against a specific reference count. Passes
+automatically until enough run history has accumulated - a brand-new
+dataset never false-fails on day one.
 
 ---
 
