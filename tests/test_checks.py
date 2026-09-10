@@ -2,9 +2,10 @@
 reconciliation, cross_dataset_consistency, anomaly, expression, accuracy,
 immutability, coverage, period_gap, sentinel_value, stale_record,
 derived_field, outlier, scd_overlap, uniform_value, castable, length,
-fuzzy_duplicate, cross_source_duplicate, and monotonicity - plus the
-generic filter_expression scoping feature, completeness's
-treat_blank_as_null, and accuracy's value_map/abs_tolerance."""
+fuzzy_duplicate, cross_source_duplicate, monotonicity, and
+no_circular_reference - plus the generic filter_expression scoping
+feature, completeness's treat_blank_as_null, and accuracy's
+value_map/abs_tolerance."""
 from datetime import date, datetime, timedelta, timezone
 
 from pyspark_dq.engine import DQEngine
@@ -805,3 +806,70 @@ def test_accuracy_abs_tolerance_flags_significant_drift(spark):
 
     assert result["status"] == "FAIL"
     assert result["failed_rows"] == 1
+
+
+def test_no_circular_reference_flags_self_reference(spark):
+    df = spark.createDataFrame([("E1", "E1"), ("E2", "E1")], ["employee_id", "manager_id"])
+    check = CheckDefinition(
+        name="no_org_hierarchy_loop",
+        type="no_circular_reference",
+        column="employee_id",
+        parent_column="manager_id",
+        threshold=1.0,
+    )
+    result = _run(spark, df, check)
+
+    assert result["status"] == "FAIL"
+    assert result["failed_rows"] == 1  # E1 reports to itself
+    assert result["total_rows"] == 2
+
+
+def test_no_circular_reference_flags_a_multi_hop_cycle(spark):
+    df = spark.createDataFrame(
+        [("A", "B"), ("B", "C"), ("C", "A")], ["category_id", "parent_category_id"]
+    )
+    check = CheckDefinition(
+        name="no_category_hierarchy_loop",
+        type="no_circular_reference",
+        column="category_id",
+        parent_column="parent_category_id",
+        max_depth=5,
+        threshold=1.0,
+    )
+    result = _run(spark, df, check)
+
+    assert result["status"] == "FAIL"
+    assert result["failed_rows"] == 3  # A, B, and C are all part of the cycle
+
+
+def test_no_circular_reference_passes_for_a_clean_tree(spark):
+    df = spark.createDataFrame(
+        [("A", None), ("B", "A"), ("C", "A"), ("D", "B")], ["category_id", "parent_category_id"]
+    )
+    check = CheckDefinition(
+        name="no_category_hierarchy_loop",
+        type="no_circular_reference",
+        column="category_id",
+        parent_column="parent_category_id",
+    )
+    result = _run(spark, df, check)
+
+    assert result["status"] == "PASS"
+
+
+def test_no_circular_reference_respects_max_depth_bound(spark):
+    # A 4-hop cycle (A->B->C->D->A) isn't detected with max_depth=2 - a
+    # documented characteristic, not a bug: it simply isn't checked that deep.
+    df = spark.createDataFrame(
+        [("A", "B"), ("B", "C"), ("C", "D"), ("D", "A")], ["category_id", "parent_category_id"]
+    )
+    check = CheckDefinition(
+        name="no_category_hierarchy_loop",
+        type="no_circular_reference",
+        column="category_id",
+        parent_column="parent_category_id",
+        max_depth=2,
+    )
+    result = _run(spark, df, check)
+
+    assert result["status"] == "PASS"

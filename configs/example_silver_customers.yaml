@@ -5,8 +5,9 @@
 # the raw bronze load, cross-check status against a second system (CRM) on
 # a different coding scheme, make sure this customer's SCD Type 2 version
 # history never has two overlapping "current" rows, catch the same person
-# recorded twice under a slightly different spelling of their name, and
-# confirm this system's clock hasn't drifted too far from the CRM's. Some
+# recorded twice under a slightly different spelling of their name, confirm
+# this system's clock hasn't drifted too far from the CRM's, and make sure
+# the referral chain (who referred whom) never loops back on itself. Some
 # checks are "warning" severity - they get recorded and are visible on a
 # dashboard, but a small rate of bad values won't halt the pipeline;
 # "critical" checks will.
@@ -144,3 +145,15 @@ checks:
     # value_map's exact-match comparison. Both sides are cast to double,
     # which turns a timestamp into Unix epoch seconds - so abs_tolerance
     # here is in seconds.
+
+  - name: no_referral_chain_loop
+    type: no_circular_reference
+    column: customer_id
+    parent_column: referred_by_customer_id   # NULL for a customer who wasn't referred
+    max_depth: 10                              # referral chains are rarely more than a few hops deep
+    severity: critical
+    threshold: 1.0
+    # Catches "circular references": customer A referred B, and (through a
+    # data error, or a bad merge of two records) B ends up listed as having
+    # referred A. A direct self-reference (a customer "referred by" themselves)
+    # is caught the same way, as the simplest possible cycle.

@@ -379,7 +379,42 @@ in a reference dataset.
   threshold: 1.0
 ```
 Catches: a country_code with no corresponding master record - "referential/
-lookup code invalid," e.g. a country code of "ZZ" that isn't in the ISO list.
+lookup code invalid" (e.g. a country code of "ZZ" that isn't in the ISO
+list), "orphan records" (a foreign key referencing a non-existent parent),
+and "broken referential integrity after deletes" (the parent row was
+removed, leaving a dangling reference) - all the same mechanism, whichever
+way the orphan came to exist. `ref_dfs` doesn't care what catalog or
+database a DataFrame was read from, so this also covers "cross-database
+referential mismatch" without any special handling.
+
+**`no_circular_reference`** - following `parent_column` from any row in
+`column` must never lead back to that same row, within `max_depth` hops
+(default 20). Spark has no native recursive query support, so this is a
+bounded iterative self-join - each hop is one more join, so don't raise
+`max_depth` past what the hierarchy could plausibly need.
+
+```yaml
+- name: no_org_hierarchy_loop
+  type: no_circular_reference
+  column: employee_id
+  parent_column: manager_id
+  max_depth: 10
+  severity: critical
+  threshold: 1.0
+```
+Catches: "circular references" (A references B, B references A) and
+"hierarchy/parent-child violations" - including the simplest case, an
+employee who reports to themselves, which is just a cycle of length one and
+needs no special-casing.
+
+For "cardinality violation" (a 1:1 relationship secretly has multiple
+matches), combine `uniqueness` on the *child* table's foreign key (rules
+out 1:many) with `coverage` or `referential_integrity` (rules out 1:zero) -
+no new check type needed, that combination already proves exactly 1:1. For
+"SCD integrity issues" (multiple rows flagged `current = Y` for the same
+key), scope a plain `uniqueness` check with `filter_expression: "is_current
+= 'Y'"` - the same composability `scd_overlap`'s date-range version doesn't
+need for this simpler boolean-flag pattern.
 
 **`accuracy`** - for rows whose join key *does* exist in a reference
 dataset, verify a mapped attribute *agrees* with the reference's value for
@@ -734,12 +769,14 @@ it above; unused fields are just left `None`.
 | Field | Type | Used by |
 |---|---|---|
 | `name` | str (required) | all - must be unique within a config |
-| `type` | str (required) | all - one of the 28 types above |
+| `type` | str (required) | all - one of the 29 types above |
 | `severity` | `"critical"` \| `"warning"` (default `"warning"`) | all |
 | `threshold` | float 0.0-1.0 (default `1.0`) | all |
-| `column` | str | completeness, sentinel_value, coverage, period_gap, stale_record, derived_field, outlier, uniform_value, castable, length, fuzzy_duplicate, cross_source_duplicate, monotonicity, uniqueness, range, value_set, regex, referential_integrity, accuracy, reconciliation, cross_dataset_consistency, anomaly |
+| `column` | str | completeness, sentinel_value, coverage, period_gap, stale_record, derived_field, outlier, uniform_value, castable, length, fuzzy_duplicate, cross_source_duplicate, monotonicity, no_circular_reference, uniqueness, range, value_set, regex, referential_integrity, accuracy, reconciliation, cross_dataset_consistency, anomaly |
 | `columns` | list[str] | uniqueness (composite key), cross_dataset_consistency (group-by), immutability (fingerprint columns), scd_overlap (entity key), fuzzy_duplicate (optional blocking key), monotonicity (optional partition key) |
 | `order_by` | str | monotonicity (required - the column defining arrival order) |
+| `parent_column` | str | no_circular_reference (required) |
+| `max_depth` | int ≥ 1 (default `20`) | no_circular_reference |
 | `max_edit_distance` | int ≥ 0 (default `2`) | fuzzy_duplicate |
 | `treat_blank_as_null` | bool (default `false`) | completeness |
 | `disallowed_values` | list | sentinel_value |
@@ -939,7 +976,7 @@ import pytest
 pytest.main(["-v", f"{PKG_ROOT}/tests/test_checks.py"])
 ```
 
-This has been run end-to-end on this workspace's serverless compute (47/47
+This has been run end-to-end on this workspace's serverless compute (51/51
 passing, covering every check type added on top of the original nine plus
 `filter_expression` and `treat_blank_as_null`). The `spark` fixture in
 `tests/conftest.py` detects when it's running inside
@@ -987,6 +1024,7 @@ package - included here so they don't get rediscovered:
 | `schema` | Validity | dtypes match expected | | |
 | `expression` | Validity | arbitrary SQL predicate, per row | | |
 | `referential_integrity` | Accuracy | key exists in reference dataset | ✅ | |
+| `no_circular_reference` | Accuracy | self-referential hierarchy has no cycle | | |
 | `accuracy` | Accuracy | mapped attribute matches reference | ✅ | |
 | `stale_record` | Accuracy | this row's own timestamp isn't stale | | |
 | `derived_field` | Accuracy | column equals a formula, within tolerance | | |

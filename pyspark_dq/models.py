@@ -35,6 +35,7 @@ VALID_CHECK_TYPES = (
     "fuzzy_duplicate",
     "cross_source_duplicate",
     "monotonicity",
+    "no_circular_reference",
 )
 
 
@@ -72,6 +73,8 @@ class CheckDefinition:
     target_type: Optional[str] = None
     max_edit_distance: Optional[int] = None
     order_by: Optional[str] = None
+    parent_column: Optional[str] = None
+    max_depth: Optional[int] = None
 
     def __post_init__(self) -> None:
         if self.type not in VALID_CHECK_TYPES:
@@ -92,6 +95,8 @@ class CheckDefinition:
             raise ValueError(f"num_std_dev must be > 0 in check '{self.name}'")
         if self.max_edit_distance is not None and self.max_edit_distance < 0:
             raise ValueError(f"max_edit_distance must be >= 0 in check '{self.name}'")
+        if self.max_depth is not None and self.max_depth < 1:
+            raise ValueError(f"max_depth must be >= 1 in check '{self.name}'")
 
 
 @dataclass

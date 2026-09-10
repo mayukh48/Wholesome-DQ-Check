@@ -29,6 +29,7 @@ from . import (
     immutability,
     length,
     monotonicity,
+    no_circular_reference,
     outlier,
     period_gap,
     range as range_check,
@@ -79,6 +80,7 @@ DATASET_LEVEL_CHECKS = {
     "uniform_value": uniform_value,
     "fuzzy_duplicate": fuzzy_duplicate,
     "cross_source_duplicate": cross_source_duplicate,
+    "no_circular_reference": no_circular_reference,
 }
 
 ROW_LEVEL_TYPES = set(ROW_LEVEL_CHECKS)
@@ -103,6 +105,7 @@ __all__ = [
     "immutability",
     "length",
     "monotonicity",
+    "no_circular_reference",
     "outlier",
     "period_gap",
     "reconciliation",
