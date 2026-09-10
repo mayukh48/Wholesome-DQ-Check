@@ -7,8 +7,10 @@
 # quantity x unit_price, no single order amount is a wild statistical
 # outlier, the raw landed date string is actually a real date (not just
 # date-shaped), a backfill isn't about to re-insert orders already in the
-# target table, orders arrive in event-time order per store, and the schema
-# hasn't drifted from what the ingestion job expects.
+# target table, orders arrive in event-time order per store, a semi-
+# structured array column hasn't blown up in size, and the schema is
+# exactly what the ingestion job expects - no drift, no surprise extra
+# columns, no reordering.
 
 dataset: orders          # logical dataset name, recorded in every result row
 layer: bronze            # medallion layer, recorded in every result row - purely metadata
@@ -108,6 +110,15 @@ checks:
     # a sign of stream replay, clock skew at the source, or a race in
     # upstream buffering.
 
+  - name: tags_array_size_is_reasonable
+    type: length
+    column: tags   # an array<string> column - `length` auto-detects it and checks element count, not character count
+    max: 20
+    severity: warning
+    threshold: 0.99
+    # Catches "inconsistent array lengths" in a semi-structured feed - e.g.
+    # a malformed upstream JSON payload producing a wildly oversized array.
+
   - name: expected_columns_present
     type: schema
     expected_schema:
@@ -122,4 +133,13 @@ checks:
       created_at: timestamp
       created_at_raw: string
       ingestion_offset: long
+      tags: array<string>
     severity: critical
+    strict: true          # also fail if a column shows up that isn't listed here
+    enforce_order: true     # also fail if the source reorders these columns
+    # strict catches "unexpected/extra columns" - a new, unmapped column
+    # quietly appearing in the feed; enforce_order catches "column order
+    # dependency failure" - a pipeline that (incorrectly) assumed a fixed
+    # column position breaking when the source reorders them. Neither is
+    # checked by default, since most pipelines bind by column name and
+    # genuinely don't care about either.

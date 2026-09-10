@@ -264,8 +264,9 @@ a single idempotent re-run, see `reconciliation`, above.)
 ```
 Catches "domain/range violations" like a discount percentage of 150%.
 
-**`length`** - a string column's non-null values must have a character
-length in `[min, max]`. The string-length analog of `range`.
+**`length`** - a column's non-null values must have a size in `[min, max]`.
+The size analog of `range`: character length for a string, element count
+for an array or map column (auto-detected from the column's actual type).
 
 ```yaml
 - name: order_id_length_is_valid
@@ -277,7 +278,10 @@ length in `[min, max]`. The string-length analog of `range`.
   threshold: 0.99
 ```
 Catches "field exceeds/undercuts expected character length" - a code that's
-too short or too long to be a real value for this field.
+too short or too long to be a real value for this field - and, pointed at
+an `array`/`map` column instead of a string one, "inconsistent array
+lengths" in a semi-structured feed (e.g. a malformed JSON payload producing
+a wildly oversized array).
 
 **`castable`** - a column's non-null values must actually convert to
 `target_type` (a Spark SQL type name), using `try_cast` rather than a
@@ -334,7 +338,9 @@ bytes producing garbled/mojibake text.
 
 **`schema`** - the DataFrame's actual dtypes must match an expected map.
 Metadata-only (`df.dtypes`, no Spark job triggered), so this is essentially
-free.
+free. Spark's dtype strings are fully recursive (a struct/array column's
+dtype spells out its whole nested shape), so this already catches nested
+schema drift too, not just flat top-level columns.
 
 ```yaml
 - name: expected_columns_present
@@ -346,8 +352,18 @@ free.
     status: string
     created_at: timestamp
   severity: critical
+  strict: true          # also fail on a column that isn't listed here
+  enforce_order: true     # also fail if these columns appear out of order
 ```
-Catches: a source column silently renamed, retyped, or dropped.
+Catches: "schema drift," "data type drift," and "metadata schema mismatch"
+- a source column silently renamed, retyped, or dropped, or a data catalog
+schema that no longer matches the actual table. Set `strict: true` to also
+catch "unexpected/extra columns" - a new, unmapped column quietly showing
+up in the feed - which isn't a failure by default (an unlisted column
+existing isn't inherently wrong). Set `enforce_order: true` to also catch
+"column order dependency failure" - a pipeline that assumed a fixed column
+position breaking when the source reorders them; most pipelines bind by
+name and genuinely don't care, so this isn't checked by default either.
 
 **`expression`** - any SQL boolean predicate, evaluated per row. The
 open-ended escape hatch for business rules that don't fit another type.
@@ -786,7 +802,7 @@ it above; unused fields are just left `None`.
 | `start_column` / `end_column` | str | scd_overlap (both required; `end_column` may be `NULL` per row = "still current") |
 | `value_map` | dict | accuracy (translates this side's raw value before comparing) |
 | `target_type` | str | castable (a Spark SQL type name, e.g. `date`, `double`, `timestamp`) |
-| `min` / `max` | float | range, row_count, length (character count, when applied to a string column) |
+| `min` / `max` | float | range, row_count, length (character count for a string column, element count for an array/map column) |
 | `allowed_values` | list | value_set, uniform_value (optional - a single value to pin the expected baseline) |
 | `pattern` | str | regex |
 | `expression` | str | expression, derived_field (the formula `column` should equal) |
@@ -795,6 +811,8 @@ it above; unused fields are just left `None`.
 | `match_column` / `ref_match_column` | str | accuracy (`ref_match_column` optional, defaults to `match_column`) |
 | `max_age_hours` | float | freshness, stale_record |
 | `expected_schema` | dict[str, str] | schema |
+| `strict` | bool (default `false`) | schema (also fail on a column not listed in `expected_schema`) |
+| `enforce_order` | bool (default `false`) | schema (also fail if the expected columns appear out of order) |
 | `tolerance` | float ≥ 0 (default `0.0`) | cross_dataset_consistency |
 | `max_pct_change` | float ≥ 0 (default `0.5`) | anomaly |
 | `lookback` | int ≥ 1 (default `5`) | anomaly |
@@ -976,7 +994,7 @@ import pytest
 pytest.main(["-v", f"{PKG_ROOT}/tests/test_checks.py"])
 ```
 
-This has been run end-to-end on this workspace's serverless compute (51/51
+This has been run end-to-end on this workspace's serverless compute (57/57
 passing, covering every check type added on top of the original nine plus
 `filter_expression` and `treat_blank_as_null`). The `spark` fixture in
 `tests/conftest.py` detects when it's running inside
@@ -1017,11 +1035,11 @@ package - included here so they don't get rediscovered:
 | `fuzzy_duplicate` | Uniqueness | no near-duplicate values (edit distance) | | |
 | `cross_source_duplicate` | Uniqueness | keys don't overlap with a reference dataset | ✅ | |
 | `range` | Validity | numeric value within min/max | | |
-| `length` | Validity | string length within min/max | | |
+| `length` | Validity | string/array/map size within min/max | | |
 | `castable` | Validity | value actually converts to a target type | | |
 | `value_set` | Validity | value in an allow-list | | |
 | `regex` | Validity | value matches a pattern | | |
-| `schema` | Validity | dtypes match expected | | |
+| `schema` | Validity | dtypes (and optionally column set/order) match expected | | |
 | `expression` | Validity | arbitrary SQL predicate, per row | | |
 | `referential_integrity` | Accuracy | key exists in reference dataset | ✅ | |
 | `no_circular_reference` | Accuracy | self-referential hierarchy has no cycle | | |

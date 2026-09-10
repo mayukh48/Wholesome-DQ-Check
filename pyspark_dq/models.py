@@ -75,6 +75,8 @@ class CheckDefinition:
     order_by: Optional[str] = None
     parent_column: Optional[str] = None
     max_depth: Optional[int] = None
+    strict: Optional[bool] = None
+    enforce_order: Optional[bool] = None
 
     def __post_init__(self) -> None:
         if self.type not in VALID_CHECK_TYPES:

@@ -4,8 +4,9 @@ immutability, coverage, period_gap, sentinel_value, stale_record,
 derived_field, outlier, scd_overlap, uniform_value, castable, length,
 fuzzy_duplicate, cross_source_duplicate, monotonicity, and
 no_circular_reference - plus the generic filter_expression scoping
-feature, completeness's treat_blank_as_null, and accuracy's
-value_map/abs_tolerance."""
+feature, completeness's treat_blank_as_null, accuracy's
+value_map/abs_tolerance, schema's strict/enforce_order, and length's
+array/map size support."""
 from datetime import date, datetime, timedelta, timezone
 
 from pyspark_dq.engine import DQEngine
@@ -870,6 +871,79 @@ def test_no_circular_reference_respects_max_depth_bound(spark):
         parent_column="parent_category_id",
         max_depth=2,
     )
+    result = _run(spark, df, check)
+
+    assert result["status"] == "PASS"
+
+
+def test_schema_strict_flags_unexpected_extra_columns(spark):
+    df = spark.createDataFrame([(1, "A", "extra")], ["id", "name", "mystery_column"])
+    check = CheckDefinition(
+        name="orders_schema_is_exact",
+        type="schema",
+        expected_schema={"id": "bigint", "name": "string"},
+        strict=True,
+    )
+    result = _run(spark, df, check)
+
+    assert result["status"] == "FAIL"
+    assert "mystery_column" in result["message"]
+
+
+def test_schema_without_strict_allows_extra_columns(spark):
+    df = spark.createDataFrame([(1, "A", "extra")], ["id", "name", "mystery_column"])
+    check = CheckDefinition(
+        name="orders_schema_is_exact",
+        type="schema",
+        expected_schema={"id": "bigint", "name": "string"},
+    )
+    result = _run(spark, df, check)
+
+    assert result["status"] == "PASS"
+
+
+def test_schema_enforce_order_flags_reordered_columns(spark):
+    df = spark.createDataFrame([("A", 1)], ["name", "id"])  # reversed vs. declared order
+    check = CheckDefinition(
+        name="orders_column_order_is_stable",
+        type="schema",
+        expected_schema={"id": "bigint", "name": "string"},
+        enforce_order=True,
+    )
+    result = _run(spark, df, check)
+
+    assert result["status"] == "FAIL"
+    assert "column order mismatch" in result["message"]
+
+
+def test_schema_enforce_order_passes_when_order_matches(spark):
+    df = spark.createDataFrame([(1, "A")], ["id", "name"])
+    check = CheckDefinition(
+        name="orders_column_order_is_stable",
+        type="schema",
+        expected_schema={"id": "bigint", "name": "string"},
+        enforce_order=True,
+    )
+    result = _run(spark, df, check)
+
+    assert result["status"] == "PASS"
+
+
+def test_length_checks_array_size_not_character_length(spark):
+    df = spark.createDataFrame([(1, ["a", "b", "c"]), (2, ["x"])], ["id", "tags"])
+    check = CheckDefinition(
+        name="tags_array_size_is_valid", type="length", column="tags", min=2, max=5, threshold=1.0
+    )
+    result = _run(spark, df, check)
+
+    assert result["status"] == "FAIL"
+    assert result["failed_rows"] == 1  # ["x"] has only 1 element, below min=2
+    assert result["total_rows"] == 2
+
+
+def test_length_array_size_passes_within_bounds(spark):
+    df = spark.createDataFrame([(1, ["a", "b"]), (2, ["x", "y", "z"])], ["id", "tags"])
+    check = CheckDefinition(name="tags_array_size_is_valid", type="length", column="tags", min=2, max=5)
     result = _run(spark, df, check)
 
     assert result["status"] == "PASS"
