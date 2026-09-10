@@ -1,11 +1,13 @@
 # Example config for a BRONZE-layer table.
 # Bronze is raw/landed data, so checks here are intentionally loose:
 # just make sure something landed, the primary key exists (including
-# disguised-blank order_ids, not just true NULLs), no known placeholder
-# values snuck in instead of a real NULL, every active store actually shows
-# up today, amount roughly agrees with quantity x unit_price, no single
-# order amount is a wild statistical outlier, and the schema hasn't drifted
-# from what the ingestion job expects.
+# disguised-blank order_ids, not just true NULLs) and is the expected
+# length, no known placeholder values snuck in instead of a real NULL,
+# every active store actually shows up today, amount roughly agrees with
+# quantity x unit_price, no single order amount is a wild statistical
+# outlier, the raw landed date string is actually a real date (not just
+# date-shaped), and the schema hasn't drifted from what the ingestion job
+# expects.
 
 dataset: orders          # logical dataset name, recorded in every result row
 layer: bronze            # medallion layer, recorded in every result row - purely metadata
@@ -63,6 +65,23 @@ checks:
     # dataset" - a store accidentally sending amounts in a different
     # currency without anyone noticing until totals stopped adding up.
 
+  - name: order_id_length_is_valid
+    type: length
+    column: order_id
+    min: 8
+    max: 12
+    severity: warning
+    threshold: 0.99
+
+  - name: created_at_raw_is_a_real_date
+    type: castable
+    column: created_at_raw    # bronze often lands the source's raw string before it's cast to a real type
+    target_type: timestamp
+    severity: critical
+    threshold: 0.99
+    # "try_cast" rejects "13/45/2023"-style format violations *and*
+    # calendar-invalid dates a regex would wrongly accept (e.g. Feb 30).
+
   - name: expected_columns_present
     type: schema
     expected_schema:
@@ -75,4 +94,5 @@ checks:
       currency: string
       status: string
       created_at: timestamp
+      created_at_raw: string
     severity: critical

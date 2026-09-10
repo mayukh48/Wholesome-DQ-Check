@@ -217,8 +217,43 @@ duplicates.
   severity: warning
   threshold: 0.99          # allow up to 1% of rows to have a bad age before flagging FAIL
 ```
+Catches "domain/range violations" like a discount percentage of 150%.
+
+**`length`** - a string column's non-null values must have a character
+length in `[min, max]`. The string-length analog of `range`.
+
+```yaml
+- name: order_id_length_is_valid
+  type: length
+  column: order_id
+  min: 8
+  max: 12
+  severity: warning
+  threshold: 0.99
+```
+Catches "field exceeds/undercuts expected character length" - a code that's
+too short or too long to be a real value for this field.
+
+**`castable`** - a column's non-null values must actually convert to
+`target_type` (a Spark SQL type name), using `try_cast` rather than a
+format-only pattern.
+
+```yaml
+- name: raw_date_is_a_real_date
+  type: castable
+  column: created_at_raw
+  target_type: timestamp
+  severity: critical
+  threshold: 0.99
+```
+Catches "format violation" and "data type" issues - "13/45/2023" or a
+numeric field containing alphabetic characters - and does it more reliably
+than a hand-written regex: `try_cast(..., "date")` correctly rejects
+"2023-02-30" (shaped like a date, but not a real one) the way a
+format-only pattern can't.
 
 **`value_set`** - a column's non-null values must be in an allow-list.
+Exact match, case-sensitive by default.
 
 ```yaml
 - name: status_is_known_value
@@ -228,10 +263,14 @@ duplicates.
   severity: warning
   threshold: 1.0
 ```
-Paired with `completeness` on a grain-discriminator column (e.g. `period_type:
-DAILY|MONTHLY`), this also catches "inconsistent grain" - a table silently
-mixing daily and monthly rows - by making sure every row is explicitly
-tagged with a valid grain instead of leaving it to guesswork.
+Catches an unrecognized/misspelled enum value ("Pnding" instead of
+"Pending") and - because the match is case-sensitive - a "case sensitivity
+violation" too (an enum stored as "Pending" when only "PENDING" is
+allowed fails this exactly as it should). Paired with `completeness` on a
+grain-discriminator column (e.g. `period_type: DAILY|MONTHLY`), this also
+catches "inconsistent grain" - a table silently mixing daily and monthly
+rows - by making sure every row is explicitly tagged with a valid grain
+instead of leaving it to guesswork.
 
 **`regex`** - a column's non-null values must match a pattern.
 
@@ -243,6 +282,10 @@ tagged with a valid grain instead of leaving it to guesswork.
   severity: warning
   threshold: 0.98
 ```
+Catches "pattern/regex violations" (a missing `@`, a malformed phone
+number) and, with a pattern restricted to expected character ranges (e.g.
+`^[\x20-\x7E]*$` for printable ASCII), "encoding violations" - non-UTF8
+bytes producing garbled/mojibake text.
 
 **`schema`** - the DataFrame's actual dtypes must match an expected map.
 Metadata-only (`df.dtypes`, no Spark job triggered), so this is essentially
@@ -290,7 +333,8 @@ in a reference dataset.
   severity: critical
   threshold: 1.0
 ```
-Catches: a country_code with no corresponding master record.
+Catches: a country_code with no corresponding master record - "referential/
+lookup code invalid," e.g. a country code of "ZZ" that isn't in the ISO list.
 
 **`accuracy`** - for rows whose join key *does* exist in a reference
 dataset, verify a mapped attribute *agrees* with the reference's value for
@@ -595,10 +639,10 @@ it above; unused fields are just left `None`.
 | Field | Type | Used by |
 |---|---|---|
 | `name` | str (required) | all - must be unique within a config |
-| `type` | str (required) | all - one of the 23 types above |
+| `type` | str (required) | all - one of the 25 types above |
 | `severity` | `"critical"` \| `"warning"` (default `"warning"`) | all |
 | `threshold` | float 0.0-1.0 (default `1.0`) | all |
-| `column` | str | completeness, sentinel_value, coverage, period_gap, stale_record, derived_field, outlier, uniform_value, uniqueness, range, value_set, regex, referential_integrity, accuracy, reconciliation, cross_dataset_consistency, anomaly |
+| `column` | str | completeness, sentinel_value, coverage, period_gap, stale_record, derived_field, outlier, uniform_value, castable, length, uniqueness, range, value_set, regex, referential_integrity, accuracy, reconciliation, cross_dataset_consistency, anomaly |
 | `columns` | list[str] | uniqueness (composite key), cross_dataset_consistency (group-by), immutability (fingerprint columns), scd_overlap (entity key) |
 | `treat_blank_as_null` | bool (default `false`) | completeness |
 | `disallowed_values` | list | sentinel_value |
@@ -607,7 +651,8 @@ it above; unused fields are just left `None`.
 | `num_std_dev` | float > 0 (default `3.0`) | outlier |
 | `start_column` / `end_column` | str | scd_overlap (both required; `end_column` may be `NULL` per row = "still current") |
 | `value_map` | dict | accuracy (translates this side's raw value before comparing) |
-| `min` / `max` | float | range, row_count |
+| `target_type` | str | castable (a Spark SQL type name, e.g. `date`, `double`, `timestamp`) |
+| `min` / `max` | float | range, row_count, length (character count, when applied to a string column) |
 | `allowed_values` | list | value_set, uniform_value (optional - a single value to pin the expected baseline) |
 | `pattern` | str | regex |
 | `expression` | str | expression, derived_field (the formula `column` should equal) |
@@ -797,7 +842,7 @@ import pytest
 pytest.main(["-v", f"{PKG_ROOT}/tests/test_checks.py"])
 ```
 
-This has been run end-to-end on this workspace's serverless compute (33/33
+This has been run end-to-end on this workspace's serverless compute (38/38
 passing, covering every check type added on top of the original nine plus
 `filter_expression` and `treat_blank_as_null`). The `spark` fixture in
 `tests/conftest.py` detects when it's running inside
@@ -836,6 +881,8 @@ package - included here so they don't get rediscovered:
 | `row_count` | Completeness | row count within bounds | | |
 | `uniqueness` | Uniqueness | no duplicate values | | |
 | `range` | Validity | numeric value within min/max | | |
+| `length` | Validity | string length within min/max | | |
+| `castable` | Validity | value actually converts to a target type | | |
 | `value_set` | Validity | value in an allow-list | | |
 | `regex` | Validity | value matches a pattern | | |
 | `schema` | Validity | dtypes match expected | | |

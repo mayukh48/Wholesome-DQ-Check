@@ -1,8 +1,9 @@
 """Tests for the gap-closing check types added on top of the original nine:
 reconciliation, cross_dataset_consistency, anomaly, expression, accuracy,
 immutability, coverage, period_gap, sentinel_value, stale_record,
-derived_field, and outlier - plus the generic filter_expression scoping
-feature and completeness's treat_blank_as_null."""
+derived_field, outlier, scd_overlap, uniform_value, castable, and length -
+plus the generic filter_expression scoping feature, completeness's
+treat_blank_as_null, and accuracy's value_map."""
 from datetime import date, datetime, timedelta, timezone
 
 from pyspark_dq.engine import DQEngine
@@ -579,3 +580,64 @@ def test_uniform_value_with_explicit_expected_value(spark):
 
     assert result["status"] == "FAIL"
     assert result["failed_rows"] == 1
+
+
+def test_castable_flags_unparseable_values(spark):
+    df = spark.createDataFrame(
+        [(1, "2023-05-10"), (2, "13/45/2023"), (3, None)], ["id", "raw_date"]
+    )
+    check = CheckDefinition(
+        name="raw_date_is_a_real_date",
+        type="castable",
+        column="raw_date",
+        target_type="date",
+        threshold=1.0,
+    )
+    result = _run(spark, df, check)
+
+    assert result["status"] == "FAIL"
+    assert result["failed_rows"] == 1  # only "13/45/2023"; NULL is completeness's job
+    assert result["total_rows"] == 3
+
+
+def test_castable_rejects_a_logically_invalid_date(spark):
+    # "2023-02-30" is shaped like a date but isn't a real calendar date - a
+    # format-only regex pattern would wrongly let this through.
+    df = spark.createDataFrame([(1, "2023-02-30")], ["id", "raw_date"])
+    check = CheckDefinition(
+        name="raw_date_is_a_real_date", type="castable", column="raw_date", target_type="date"
+    )
+    result = _run(spark, df, check)
+
+    assert result["status"] == "FAIL"
+    assert result["failed_rows"] == 1
+
+
+def test_castable_passes_valid_numeric_strings(spark):
+    df = spark.createDataFrame([(1, "42.5"), (2, "-3")], ["id", "raw_amount"])
+    check = CheckDefinition(
+        name="raw_amount_is_numeric", type="castable", column="raw_amount", target_type="double"
+    )
+    result = _run(spark, df, check)
+
+    assert result["status"] == "PASS"
+
+
+def test_length_flags_out_of_bounds_strings(spark):
+    df = spark.createDataFrame([(1, "AB"), (2, "ABCDE"), (3, None)], ["id", "code"])
+    check = CheckDefinition(
+        name="code_length_is_valid", type="length", column="code", min=3, max=4, threshold=1.0
+    )
+    result = _run(spark, df, check)
+
+    assert result["status"] == "FAIL"
+    assert result["failed_rows"] == 2  # "AB" too short, "ABCDE" too long; NULL is completeness's job
+    assert result["total_rows"] == 3
+
+
+def test_length_passes_within_bounds(spark):
+    df = spark.createDataFrame([(1, "ABC"), (2, "ABCD")], ["id", "code"])
+    check = CheckDefinition(name="code_length_is_valid", type="length", column="code", min=3, max=4)
+    result = _run(spark, df, check)
+
+    assert result["status"] == "PASS"

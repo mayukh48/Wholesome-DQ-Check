@@ -17,6 +17,7 @@ shape, add one line below - the engine never needs to change.
 from . import (
     accuracy,
     anomaly,
+    castable,
     completeness,
     coverage,
     cross_dataset_consistency,
@@ -24,6 +25,7 @@ from . import (
     expression,
     freshness,
     immutability,
+    length,
     outlier,
     period_gap,
     range as range_check,
@@ -52,6 +54,8 @@ ROW_LEVEL_CHECKS = {
     "stale_record": stale_record,
     "derived_field": derived_field,
     "outlier": outlier,
+    "castable": castable,
+    "length": length,
 }
 
 # check.type -> module exposing evaluate(check, df, **kwargs) -> CheckOutcome.
@@ -81,6 +85,7 @@ __all__ = [
     "DATASET_LEVEL_TYPES",
     "accuracy",
     "anomaly",
+    "castable",
     "completeness",
     "coverage",
     "cross_dataset_consistency",
@@ -88,6 +93,7 @@ __all__ = [
     "expression",
     "freshness",
     "immutability",
+    "length",
     "outlier",
     "period_gap",
     "reconciliation",
