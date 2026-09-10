@@ -1,0 +1,66 @@
+# Example config for a GOLD-layer table.
+# Gold is business-facing aggregated data, so checks focus on things that
+# would embarrass the business if wrong: no gaps in the summary, no negative
+# revenue, the report isn't stale (i.e. yesterday's aggregation actually ran),
+# revenue hasn't unexpectedly swung vs. recent history, region totals still
+# tie back to the raw orders feed, and only current-month data is included.
+
+dataset: revenue_summary
+layer: gold
+
+checks:
+  - name: has_rows_for_every_report_run
+    type: row_count
+    min: 1
+    severity: critical
+
+  - name: revenue_not_negative
+    type: range
+    column: total_revenue
+    min: 0
+    severity: critical
+    threshold: 1.0
+
+  - name: region_not_null
+    type: completeness
+    column: region
+    severity: critical
+    threshold: 1.0
+
+  - name: report_is_fresh
+    type: freshness
+    column: report_date
+    max_age_hours: 30      # allow some slack past the 24h reporting cycle
+    severity: critical
+
+  - name: total_revenue_not_anomalous
+    type: anomaly
+    column: total_revenue
+    max_pct_change: 0.25    # flag if total revenue swings more than 25% vs. the recent baseline
+    lookback: 7              # average of the last 7 runs
+    severity: warning
+
+  - name: revenue_by_region_matches_raw_orders
+    type: cross_dataset_consistency
+    column: total_revenue
+    columns: [region]        # compare sum(total_revenue) per region between this table and raw orders
+    ref_dataset: raw_orders  # must match a key passed in --ref-table / ref_dfs
+    tolerance: 0.01           # allow up to 1% rounding drift per region
+    severity: critical
+    threshold: 1.0             # every region's total must be within tolerance
+
+  - name: current_month_data_only
+    type: expression
+    expression: "month(report_date) = month(current_date()) AND year(report_date) = year(current_date())"
+    severity: critical
+    threshold: 1.0
+
+  - name: historical_months_unchanged
+    type: immutability
+    columns: [region, total_revenue]   # fingerprint just these columns, not audit/ingestion metadata
+    # Scope to already-finalized months only - current_month rows are
+    # expected to change intra-month and shouldn't trip this check. Detects
+    # "historical data update causes mismatch"-style incidents: a silent
+    # overwrite of a past period changes the fingerprint vs. the last run.
+    filter_expression: "report_date < date_trunc('month', current_date())"
+    severity: critical

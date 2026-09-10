@@ -1,0 +1,78 @@
+# Example config for a SILVER-layer table.
+# Silver is cleaned/conformed data, so we tighten checks: enforce uniqueness
+# of the primary key, validate value ranges/formats, check a foreign key
+# (country_code) against a reference dataset, and reconcile row counts
+# against the raw bronze load to catch silent drops during cleansing. Some
+# checks are "warning" severity - they get recorded and are visible on a
+# dashboard, but a small rate of bad values won't halt the pipeline;
+# "critical" checks will.
+
+dataset: customers
+layer: silver
+
+checks:
+  - name: customer_id_not_null
+    type: completeness
+    column: customer_id
+    severity: critical
+    threshold: 1.0
+
+  - name: customer_id_unique
+    type: uniqueness
+    columns: [customer_id]      # use `columns` (list) for composite keys, `column` also works for a single key
+    severity: critical
+    threshold: 1.0
+
+  - name: age_within_range
+    type: range
+    column: age
+    min: 0
+    max: 120
+    severity: warning
+    threshold: 0.99              # allow up to 1% of rows to have a bad age before flagging FAIL
+
+  - name: status_is_known_value
+    type: value_set
+    column: status
+    allowed_values: [ACTIVE, INACTIVE, PENDING]
+    severity: warning
+    threshold: 1.0
+
+  - name: email_looks_valid
+    type: regex
+    column: email
+    pattern: '^[^@\s]+@[^@\s]+\.[^@\s]+$'
+    severity: warning
+    threshold: 0.98
+
+  - name: country_code_exists
+    type: referential_integrity
+    column: country_code
+    ref_dataset: countries       # must match a key passed in --ref-table / ref_dfs
+    ref_column: code
+    severity: critical
+    threshold: 1.0
+
+  - name: record_is_fresh
+    type: freshness
+    column: updated_at
+    max_age_hours: 24
+    severity: warning
+
+  - name: raw_vs_silver_row_count
+    type: reconciliation
+    ref_dataset: raw_customers   # must match a key passed in --ref-table / ref_dfs
+    severity: critical
+    threshold: 0.99               # allow up to 1% row loss between raw and cleansed, e.g. from dedup
+
+  - name: country_region_matches_master
+    type: accuracy
+    column: country_code          # join key
+    match_column: region           # attribute that must agree with the master's value
+    ref_dataset: countries        # must match a key passed in --ref-table / ref_dfs
+    severity: critical
+    threshold: 1.0
+    # referential_integrity (above) only proves country_code *exists* in the
+    # master; this proves the region this customer was mapped to for that
+    # country_code is actually *correct* - catches "depot mapped to wrong
+    # state"-style errors that referential_integrity alone can't see.

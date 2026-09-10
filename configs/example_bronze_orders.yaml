@@ -1,0 +1,30 @@
+# Example config for a BRONZE-layer table.
+# Bronze is raw/landed data, so checks here are intentionally loose:
+# just make sure something landed, the primary key exists, and the schema
+# hasn't drifted from what the ingestion job expects. Bad *values* (e.g. an
+# out-of-range amount) are expected at this layer and get caught downstream.
+
+dataset: orders          # logical dataset name, recorded in every result row
+layer: bronze            # medallion layer, recorded in every result row - purely metadata
+
+checks:
+  - name: orders_landed
+    type: row_count
+    min: 1                    # fail if the ingestion produced zero rows
+    severity: critical
+
+  - name: order_id_present
+    type: completeness
+    column: order_id
+    severity: critical
+    threshold: 1.0             # 100% of rows must have a non-null order_id
+
+  - name: expected_columns_present
+    type: schema
+    expected_schema:
+      order_id: string
+      customer_id: string
+      amount: double
+      status: string
+      created_at: timestamp
+    severity: critical
