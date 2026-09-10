@@ -98,7 +98,7 @@ other feature in this document builds on exactly this.
 | `threshold` | The minimum pass rate (0.0-1.0) required for `status = PASS`. `1.0` means zero tolerance; `0.98` allows up to 2% of rows (or groups, or count drift) to be bad. |
 | `DQEngine` | Stateless except for holding a `SparkSession`. `run()` executes every check in a config against a DataFrame and returns a results DataFrame; `write_results()` appends it to a Delta table; `raise_on_critical_failures()` raises if anything critical failed. |
 | `CheckResult` / results table row | One row per check per run: status, pass_rate, total_rows, failed_rows, a human-readable message, plus `metric_value`/`metric_text` for checks that report a number or a fingerprint. Full schema in [The results table](#the-results-table). |
-| `ref_dfs` | A `{name: DataFrame}` dict passed to `run()`, for checks that compare against a second dataset (`referential_integrity`, `accuracy`, `reconciliation`, `cross_dataset_consistency`, `coverage`). |
+| `ref_dfs` | A `{name: DataFrame}` dict passed to `run()`, for checks that compare against a second dataset (`referential_integrity`, `accuracy`, `reconciliation`, `cross_dataset_consistency`, `coverage`, `cross_source_duplicate`). |
 | `history_df` | Prior rows from the results table, passed to `run()`, for checks that need a baseline from past runs (`anomaly`, `immutability`). |
 
 ---
@@ -200,9 +200,54 @@ tighter volume floor/ceiling, e.g. `min: 1000, max: 200000`).
   severity: critical
   threshold: 1.0
 ```
-Catches: the same outlet/customer/order appearing twice. Rows with a null
-key are excluded (that's `completeness`'s job) so they never count as
+Catches: "exact duplicate records" and "primary key violation" - the same
+outlet/customer/order appearing twice - and, via `columns`, "composite key
+duplication" (uniqueness violated only when checked across several columns
+together, e.g. `columns: [store_id, sku, sale_date]`). Rows with a null key
+are excluded (that's `completeness`'s job) so they never count as
 duplicates.
+
+**`fuzzy_duplicate`** - flags rows whose `column` is a near-match (edit
+distance ≤ `max_edit_distance`, default 2) of another row's, not just an
+exact one. Pass `columns` as a blocking key to scope the comparison instead
+of a full cross join.
+
+```yaml
+- name: no_near_duplicate_customer_names
+  type: fuzzy_duplicate
+  column: full_name
+  columns: [postal_code]   # blocking key - only compare rows that already share a postal code
+  max_edit_distance: 2
+  severity: warning
+  threshold: 0.98
+```
+Catches: "Jon Smith" vs. "John Smith" - the same real-world entity recorded
+under two different spellings. `uniqueness` only catches an *exact* repeat;
+this catches a near one. Without a blocking key every row is compared
+against every other row (O(n²)) - only skip `columns` on a dataset small
+enough, or already scoped via `filter_expression`, for that to be fine.
+
+**`cross_source_duplicate`** - flags keys in `column` that also appear in a
+reference dataset's `ref_column` - records about to collide if the two were
+merged/unioned as-is.
+
+```yaml
+- name: backfill_does_not_reinsert_already_loaded_orders
+  type: cross_source_duplicate
+  column: order_id
+  ref_dataset: orders_already_loaded   # must be a key in the ref_dfs dict / --ref-table
+  ref_column: order_id
+  severity: critical
+  threshold: 1.0
+```
+Catches two scenarios that both reduce to "do these two key-sets overlap":
+"duplicate across merge/union sources" (`ref_dataset` is another source
+system about to be unioned in) and "duplicate due to late-arriving data
+reprocessing" (`ref_dataset` is the target table a backfill is about to
+write into). `uniqueness` can't catch either - it only checks for
+duplicates *within* one already-merged dataset, not whether two *separate*
+datasets are about to collide. (For "duplicate due to reprocessing" within
+a single idempotent re-run, see `reconciliation`, above.)
 
 ### Validity — data conforms to expected format/type
 
@@ -445,7 +490,9 @@ idempotency guard.
   threshold: 0.99                # allow up to 1% row loss between raw and cleansed, e.g. from dedup
 ```
 Catches: rows silently dropped (or duplicated) between two stages of the
-pipeline - "raw vs. processed record counts don't match."
+pipeline - "raw vs. processed record counts don't match," and "duplicate
+due to reprocessing" (a pipeline re-run without idempotency double-counting
+rows) when `ref_dataset` points at an "already loaded batches" marker.
 
 **`cross_dataset_consistency`** - a summed column, grouped by one or more
 dimensions, must match a reference dataset per group.
@@ -589,8 +636,8 @@ historical slice (see above).
 ### `ref_dfs` — checks that compare against a second dataset
 
 `referential_integrity`, `accuracy`, `reconciliation`,
-`cross_dataset_consistency`, and `coverage` all read `check.ref_dataset` as
-a key into a `ref_dfs` dict you pass to `run()`:
+`cross_dataset_consistency`, `coverage`, and `cross_source_duplicate` all
+read `check.ref_dataset` as a key into a `ref_dfs` dict you pass to `run()`:
 
 ```python
 engine.run(df, config, ref_dfs={
@@ -639,11 +686,12 @@ it above; unused fields are just left `None`.
 | Field | Type | Used by |
 |---|---|---|
 | `name` | str (required) | all - must be unique within a config |
-| `type` | str (required) | all - one of the 25 types above |
+| `type` | str (required) | all - one of the 27 types above |
 | `severity` | `"critical"` \| `"warning"` (default `"warning"`) | all |
 | `threshold` | float 0.0-1.0 (default `1.0`) | all |
-| `column` | str | completeness, sentinel_value, coverage, period_gap, stale_record, derived_field, outlier, uniform_value, castable, length, uniqueness, range, value_set, regex, referential_integrity, accuracy, reconciliation, cross_dataset_consistency, anomaly |
-| `columns` | list[str] | uniqueness (composite key), cross_dataset_consistency (group-by), immutability (fingerprint columns), scd_overlap (entity key) |
+| `column` | str | completeness, sentinel_value, coverage, period_gap, stale_record, derived_field, outlier, uniform_value, castable, length, fuzzy_duplicate, cross_source_duplicate, uniqueness, range, value_set, regex, referential_integrity, accuracy, reconciliation, cross_dataset_consistency, anomaly |
+| `columns` | list[str] | uniqueness (composite key), cross_dataset_consistency (group-by), immutability (fingerprint columns), scd_overlap (entity key), fuzzy_duplicate (optional blocking key) |
+| `max_edit_distance` | int ≥ 0 (default `2`) | fuzzy_duplicate |
 | `treat_blank_as_null` | bool (default `false`) | completeness |
 | `disallowed_values` | list | sentinel_value |
 | `frequency` | `"day"` \| `"month"` \| `"year"` (default `"day"`) | period_gap |
@@ -656,8 +704,8 @@ it above; unused fields are just left `None`.
 | `allowed_values` | list | value_set, uniform_value (optional - a single value to pin the expected baseline) |
 | `pattern` | str | regex |
 | `expression` | str | expression, derived_field (the formula `column` should equal) |
-| `ref_dataset` | str | referential_integrity, accuracy, reconciliation, cross_dataset_consistency, coverage |
-| `ref_column` | str | referential_integrity (required), coverage (required), accuracy (optional, defaults to `column`) |
+| `ref_dataset` | str | referential_integrity, accuracy, reconciliation, cross_dataset_consistency, coverage, cross_source_duplicate |
+| `ref_column` | str | referential_integrity (required), coverage (required), cross_source_duplicate (required), accuracy (optional, defaults to `column`) |
 | `match_column` / `ref_match_column` | str | accuracy (`ref_match_column` optional, defaults to `match_column`) |
 | `max_age_hours` | float | freshness, stale_record |
 | `expected_schema` | dict[str, str] | schema |
@@ -842,7 +890,7 @@ import pytest
 pytest.main(["-v", f"{PKG_ROOT}/tests/test_checks.py"])
 ```
 
-This has been run end-to-end on this workspace's serverless compute (38/38
+This has been run end-to-end on this workspace's serverless compute (43/43
 passing, covering every check type added on top of the original nine plus
 `filter_expression` and `treat_blank_as_null`). The `spark` fixture in
 `tests/conftest.py` detects when it's running inside
@@ -880,6 +928,8 @@ package - included here so they don't get rediscovered:
 | `period_gap` | Completeness | no missing day/month/year in a date range | | |
 | `row_count` | Completeness | row count within bounds | | |
 | `uniqueness` | Uniqueness | no duplicate values | | |
+| `fuzzy_duplicate` | Uniqueness | no near-duplicate values (edit distance) | | |
+| `cross_source_duplicate` | Uniqueness | keys don't overlap with a reference dataset | ✅ | |
 | `range` | Validity | numeric value within min/max | | |
 | `length` | Validity | string length within min/max | | |
 | `castable` | Validity | value actually converts to a target type | | |

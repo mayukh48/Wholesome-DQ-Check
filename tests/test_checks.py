@@ -1,9 +1,10 @@
 """Tests for the gap-closing check types added on top of the original nine:
 reconciliation, cross_dataset_consistency, anomaly, expression, accuracy,
 immutability, coverage, period_gap, sentinel_value, stale_record,
-derived_field, outlier, scd_overlap, uniform_value, castable, and length -
-plus the generic filter_expression scoping feature, completeness's
-treat_blank_as_null, and accuracy's value_map."""
+derived_field, outlier, scd_overlap, uniform_value, castable, length,
+fuzzy_duplicate, and cross_source_duplicate - plus the generic
+filter_expression scoping feature, completeness's treat_blank_as_null, and
+accuracy's value_map."""
 from datetime import date, datetime, timedelta, timezone
 
 from pyspark_dq.engine import DQEngine
@@ -639,5 +640,83 @@ def test_length_passes_within_bounds(spark):
     df = spark.createDataFrame([(1, "ABC"), (2, "ABCD")], ["id", "code"])
     check = CheckDefinition(name="code_length_is_valid", type="length", column="code", min=3, max=4)
     result = _run(spark, df, check)
+
+    assert result["status"] == "PASS"
+
+
+def test_fuzzy_duplicate_flags_near_match_names(spark):
+    df = spark.createDataFrame(
+        [(1, "Jon Smith"), (2, "John Smith"), (3, "Alice Brown")], ["id", "full_name"]
+    )
+    check = CheckDefinition(
+        name="no_near_duplicate_names",
+        type="fuzzy_duplicate",
+        column="full_name",
+        max_edit_distance=2,
+        threshold=1.0,
+    )
+    result = _run(spark, df, check)
+
+    assert result["status"] == "FAIL"
+    assert result["failed_rows"] == 2  # "Jon Smith" and "John Smith" flag each other
+    assert result["total_rows"] == 3
+
+
+def test_fuzzy_duplicate_passes_when_no_names_are_close(spark):
+    df = spark.createDataFrame([(1, "Alice Brown"), (2, "Bob Jones")], ["id", "full_name"])
+    check = CheckDefinition(
+        name="no_near_duplicate_names", type="fuzzy_duplicate", column="full_name", max_edit_distance=2
+    )
+    result = _run(spark, df, check)
+
+    assert result["status"] == "PASS"
+
+
+def test_fuzzy_duplicate_uses_blocking_key_to_scope_comparisons(spark):
+    df = spark.createDataFrame(
+        [(1, "Jon Smith", "10001"), (2, "John Smith", "20002")], ["id", "full_name", "postal_code"]
+    )
+    check = CheckDefinition(
+        name="no_near_duplicate_names",
+        type="fuzzy_duplicate",
+        column="full_name",
+        columns=["postal_code"],  # different postal codes - never compared, so no flag despite similar names
+        max_edit_distance=2,
+    )
+    result = _run(spark, df, check)
+
+    assert result["status"] == "PASS"
+
+
+def test_cross_source_duplicate_flags_overlapping_keys(spark):
+    web_signups = spark.createDataFrame([("C1",), ("C2",), ("C3",)], ["customer_id"])
+    store_signups = spark.createDataFrame([("C2",), ("C4",)], ["customer_id"])
+    check = CheckDefinition(
+        name="no_overlap_between_web_and_store_signups",
+        type="cross_source_duplicate",
+        column="customer_id",
+        ref_dataset="store_signups",
+        ref_column="customer_id",
+        threshold=1.0,
+    )
+    result = _run(spark, web_signups, check, ref_dfs={"store_signups": store_signups})
+
+    assert result["status"] == "FAIL"
+    assert result["failed_rows"] == 1  # C2 is in both
+    assert result["total_rows"] == 3
+
+
+def test_cross_source_duplicate_passes_when_disjoint(spark):
+    batch = spark.createDataFrame([("O1",), ("O2",)], ["order_id"])
+    already_loaded = spark.createDataFrame([("O3",), ("O4",)], ["order_id"])
+    check = CheckDefinition(
+        name="backfill_does_not_reinsert_loaded_rows",
+        type="cross_source_duplicate",
+        column="order_id",
+        ref_dataset="already_loaded",
+        ref_column="order_id",
+        threshold=1.0,
+    )
+    result = _run(spark, batch, check, ref_dfs={"already_loaded": already_loaded})
 
     assert result["status"] == "PASS"

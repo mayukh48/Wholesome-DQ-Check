@@ -3,11 +3,12 @@
 # of the primary key, validate value ranges/formats, check a foreign key
 # (country_code) against a reference dataset, reconcile row counts against
 # the raw bronze load, cross-check status against a second system (CRM) on
-# a different coding scheme, and make sure this customer's SCD Type 2
-# version history never has two overlapping "current" rows. Some checks are
-# "warning" severity - they get recorded and are visible on a dashboard,
-# but a small rate of bad values won't halt the pipeline; "critical" checks
-# will.
+# a different coding scheme, make sure this customer's SCD Type 2 version
+# history never has two overlapping "current" rows, and catch the same
+# person recorded twice under a slightly different spelling of their name.
+# Some checks are "warning" severity - they get recorded and are visible on
+# a dashboard, but a small rate of bad values won't halt the pipeline;
+# "critical" checks will.
 
 dataset: customers
 layer: silver
@@ -115,3 +116,15 @@ checks:
     # both claiming to be valid at the same point in time. uniqueness alone
     # can't see this - it only catches an exact duplicate key, not two
     # overlapping date *ranges*.
+
+  - name: no_near_duplicate_customer_names
+    type: fuzzy_duplicate
+    column: full_name
+    columns: [postal_code]   # blocking key - only compare customers who already share a postal code
+    max_edit_distance: 2       # default is 2 if omitted
+    severity: warning
+    threshold: 0.98
+    # Catches "Jon Smith" vs. "John Smith" - the same person recorded twice
+    # under slightly different spellings. uniqueness only catches an exact
+    # repeated value; this catches a near-match. The blocking key keeps the
+    # row-to-row comparison from becoming an expensive full cross join.

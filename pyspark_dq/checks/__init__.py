@@ -21,9 +21,11 @@ from . import (
     completeness,
     coverage,
     cross_dataset_consistency,
+    cross_source_duplicate,
     derived_field,
     expression,
     freshness,
+    fuzzy_duplicate,
     immutability,
     length,
     outlier,
@@ -73,6 +75,8 @@ DATASET_LEVEL_CHECKS = {
     "period_gap": period_gap,
     "scd_overlap": scd_overlap,
     "uniform_value": uniform_value,
+    "fuzzy_duplicate": fuzzy_duplicate,
+    "cross_source_duplicate": cross_source_duplicate,
 }
 
 ROW_LEVEL_TYPES = set(ROW_LEVEL_CHECKS)
@@ -89,9 +93,11 @@ __all__ = [
     "completeness",
     "coverage",
     "cross_dataset_consistency",
+    "cross_source_duplicate",
     "derived_field",
     "expression",
     "freshness",
+    "fuzzy_duplicate",
     "immutability",
     "length",
     "outlier",

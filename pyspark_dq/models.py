@@ -32,6 +32,8 @@ VALID_CHECK_TYPES = (
     "uniform_value",
     "castable",
     "length",
+    "fuzzy_duplicate",
+    "cross_source_duplicate",
 )
 
 
@@ -67,6 +69,7 @@ class CheckDefinition:
     end_column: Optional[str] = None
     value_map: Optional[Dict[Any, Any]] = None
     target_type: Optional[str] = None
+    max_edit_distance: Optional[int] = None
 
     def __post_init__(self) -> None:
         if self.type not in VALID_CHECK_TYPES:
@@ -85,6 +88,8 @@ class CheckDefinition:
             raise ValueError(f"abs_tolerance must be >= 0 in check '{self.name}'")
         if self.num_std_dev is not None and self.num_std_dev <= 0:
             raise ValueError(f"num_std_dev must be > 0 in check '{self.name}'")
+        if self.max_edit_distance is not None and self.max_edit_distance < 0:
+            raise ValueError(f"max_edit_distance must be >= 0 in check '{self.name}'")
 
 
 @dataclass

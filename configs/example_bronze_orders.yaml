@@ -6,7 +6,8 @@
 # every active store actually shows up today, amount roughly agrees with
 # quantity x unit_price, no single order amount is a wild statistical
 # outlier, the raw landed date string is actually a real date (not just
-# date-shaped), and the schema hasn't drifted from what the ingestion job
+# date-shaped), a backfill isn't about to re-insert orders already in the
+# target table, and the schema hasn't drifted from what the ingestion job
 # expects.
 
 dataset: orders          # logical dataset name, recorded in every result row
@@ -81,6 +82,19 @@ checks:
     threshold: 0.99
     # "try_cast" rejects "13/45/2023"-style format violations *and*
     # calendar-invalid dates a regex would wrongly accept (e.g. Feb 30).
+
+  - name: backfill_does_not_reinsert_already_loaded_orders
+    type: cross_source_duplicate
+    column: order_id
+    ref_dataset: orders_already_loaded   # must match a key passed in --ref-table / ref_dfs - e.g. the target table itself
+    ref_column: order_id
+    severity: critical
+    threshold: 1.0
+    # Catches "backfill logic re-inserts already-processed records": if any
+    # order_id in this batch already exists in the target, the backfill is
+    # about to create a duplicate. Point ref_dataset at the union of another
+    # source system's orders instead to catch "duplicate across merge/union
+    # sources" - the same overlap check, different reference dataset.
 
   - name: expected_columns_present
     type: schema
