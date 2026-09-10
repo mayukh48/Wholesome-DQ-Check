@@ -64,3 +64,10 @@ checks:
     # overwrite of a past period changes the fingerprint vs. the last run.
     filter_expression: "report_date < date_trunc('month', current_date())"
     severity: critical
+
+  - name: no_missing_months_in_trend
+    type: period_gap
+    column: report_date
+    frequency: month     # one of day / month / year
+    severity: critical    # a hole in a revenue trend is exactly what would embarrass the business
+    threshold: 1.0

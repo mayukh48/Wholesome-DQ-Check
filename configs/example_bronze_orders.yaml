@@ -1,8 +1,11 @@
 # Example config for a BRONZE-layer table.
 # Bronze is raw/landed data, so checks here are intentionally loose:
-# just make sure something landed, the primary key exists, and the schema
-# hasn't drifted from what the ingestion job expects. Bad *values* (e.g. an
-# out-of-range amount) are expected at this layer and get caught downstream.
+# just make sure something landed, the primary key exists (including
+# disguised-blank order_ids, not just true NULLs), no known placeholder
+# values snuck in instead of a real NULL, every active store actually shows
+# up today, and the schema hasn't drifted from what the ingestion job
+# expects. Bad *values* (e.g. an out-of-range amount) are expected at this
+# layer and get caught downstream.
 
 dataset: orders          # logical dataset name, recorded in every result row
 layer: bronze            # medallion layer, recorded in every result row - purely metadata
@@ -18,12 +21,29 @@ checks:
     column: order_id
     severity: critical
     threshold: 1.0             # 100% of rows must have a non-null order_id
+    treat_blank_as_null: true   # also fail "" - a source system's way of disguising a missing order_id
+
+  - name: amount_not_sentinel_value
+    type: sentinel_value
+    column: amount
+    disallowed_values: [-1, 9999999]   # known placeholder values the source uses instead of a true NULL
+    severity: warning
+    threshold: 1.0
+
+  - name: every_active_store_has_orders_today
+    type: coverage
+    column: store_id
+    ref_dataset: active_stores   # must be a key in the ref_dfs dict / --ref-table
+    ref_column: store_id
+    severity: warning             # a quiet store is suspicious, not necessarily broken - start as a warning
+    threshold: 1.0
 
   - name: expected_columns_present
     type: schema
     expected_schema:
       order_id: string
       customer_id: string
+      store_id: string
       amount: double
       status: string
       created_at: timestamp

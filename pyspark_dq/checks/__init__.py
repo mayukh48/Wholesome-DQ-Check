@@ -18,16 +18,19 @@ from . import (
     accuracy,
     anomaly,
     completeness,
+    coverage,
     cross_dataset_consistency,
     expression,
     freshness,
     immutability,
+    period_gap,
     range as range_check,
     reconciliation,
     referential_integrity,
     regex as regex_check,
     row_count,
     schema as schema_check,
+    sentinel_value,
     uniqueness,
     value_set,
 )
@@ -40,6 +43,7 @@ ROW_LEVEL_CHECKS = {
     "value_set": value_set,
     "regex": regex_check,
     "expression": expression,
+    "sentinel_value": sentinel_value,
 }
 
 # check.type -> module exposing evaluate(check, df, **kwargs) -> CheckOutcome.
@@ -53,6 +57,8 @@ DATASET_LEVEL_CHECKS = {
     "cross_dataset_consistency": cross_dataset_consistency,
     "anomaly": anomaly,
     "immutability": immutability,
+    "coverage": coverage,
+    "period_gap": period_gap,
 }
 
 ROW_LEVEL_TYPES = set(ROW_LEVEL_CHECKS)
@@ -66,13 +72,16 @@ __all__ = [
     "accuracy",
     "anomaly",
     "completeness",
+    "coverage",
     "cross_dataset_consistency",
     "expression",
     "freshness",
     "immutability",
+    "period_gap",
     "reconciliation",
     "referential_integrity",
     "row_count",
+    "sentinel_value",
     "uniqueness",
     "value_set",
 ]

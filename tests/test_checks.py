@@ -1,7 +1,8 @@
 """Tests for the gap-closing check types added on top of the original nine:
 reconciliation, cross_dataset_consistency, anomaly, expression, accuracy,
-and immutability - plus the generic filter_expression scoping feature."""
-from datetime import datetime, timedelta, timezone
+immutability, coverage, period_gap, and sentinel_value - plus the generic
+filter_expression scoping feature and completeness's treat_blank_as_null."""
+from datetime import date, datetime, timedelta, timezone
 
 from pyspark_dq.engine import DQEngine
 from pyspark_dq.models import CheckDefinition, DatasetConfig
@@ -237,3 +238,123 @@ def test_filter_expression_scopes_a_row_level_check(spark):
     assert result["status"] == "FAIL"
     assert result["failed_rows"] == 1
     assert result["total_rows"] == 3
+
+
+def test_completeness_treat_blank_as_null_flags_empty_strings(spark):
+    df = spark.createDataFrame([(1, "C1"), (2, ""), (3, None)], ["id", "customer_id"])
+    check = CheckDefinition(
+        name="customer_id_present",
+        type="completeness",
+        column="customer_id",
+        treat_blank_as_null=True,
+        threshold=1.0,
+    )
+    result = _run(spark, df, check)
+
+    assert result["status"] == "FAIL"
+    assert result["failed_rows"] == 2  # both "" and the true NULL count as missing
+
+
+def test_completeness_without_flag_allows_empty_strings(spark):
+    df = spark.createDataFrame([(1, "C1"), (2, ""), (3, None)], ["id", "customer_id"])
+    check = CheckDefinition(
+        name="customer_id_present",
+        type="completeness",
+        column="customer_id",
+        threshold=1.0,
+    )
+    result = _run(spark, df, check)
+
+    assert result["status"] == "FAIL"
+    assert result["failed_rows"] == 1  # only the true NULL counts without the flag
+
+
+def test_sentinel_value_flags_disallowed_placeholders(spark):
+    df = spark.createDataFrame(
+        [(1, 100.0), (2, 0.0), (3, -999.0), (4, None)], ["id", "amount"]
+    )
+    check = CheckDefinition(
+        name="amount_not_sentinel",
+        type="sentinel_value",
+        column="amount",
+        disallowed_values=[0.0, -999.0],
+        threshold=1.0,
+    )
+    result = _run(spark, df, check)
+
+    assert result["status"] == "FAIL"
+    assert result["failed_rows"] == 2  # 0.0 and -999.0; the real NULL is untouched
+    assert result["total_rows"] == 4
+
+
+def test_coverage_flags_master_keys_missing_from_fact_table(spark):
+    stores_df = spark.createDataFrame([("A",), ("B",), ("C",)], ["store_id"])
+    sales_df = spark.createDataFrame(
+        [("A", 100.0), ("A", 50.0), ("C", 20.0)], ["store_id", "amount"]
+    )
+    check = CheckDefinition(
+        name="every_store_has_sales_today",
+        type="coverage",
+        column="store_id",
+        ref_dataset="stores",
+        ref_column="store_id",
+        threshold=1.0,
+    )
+    result = _run(spark, sales_df, check, ref_dfs={"stores": stores_df})
+
+    assert result["status"] == "FAIL"
+    assert result["failed_rows"] == 1  # store B never shows up in sales
+    assert result["total_rows"] == 3
+
+
+def test_coverage_passes_when_every_key_present(spark):
+    stores_df = spark.createDataFrame([("A",), ("B",)], ["store_id"])
+    sales_df = spark.createDataFrame([("A", 100.0), ("B", 50.0)], ["store_id", "amount"])
+    check = CheckDefinition(
+        name="every_store_has_sales_today",
+        type="coverage",
+        column="store_id",
+        ref_dataset="stores",
+        ref_column="store_id",
+        threshold=1.0,
+    )
+    result = _run(spark, sales_df, check, ref_dfs={"stores": stores_df})
+
+    assert result["status"] == "PASS"
+
+
+def test_period_gap_detects_a_missing_month(spark):
+    df = spark.createDataFrame(
+        [(date(2025, 1, 15),), (date(2025, 2, 10),), (date(2025, 4, 5),)],
+        ["report_date"],
+    )
+    check = CheckDefinition(
+        name="no_missing_months",
+        type="period_gap",
+        column="report_date",
+        frequency="month",
+        threshold=1.0,
+    )
+    result = _run(spark, df, check)
+
+    assert result["status"] == "FAIL"
+    assert result["failed_rows"] == 1  # March is missing
+    assert result["total_rows"] == 4  # Jan, Feb, Mar, Apr
+    assert "missing_periods=1/4" in result["message"]
+
+
+def test_period_gap_passes_when_no_gaps(spark):
+    df = spark.createDataFrame(
+        [(date(2025, 1, 15),), (date(2025, 2, 10),), (date(2025, 3, 5),)],
+        ["report_date"],
+    )
+    check = CheckDefinition(
+        name="no_missing_months",
+        type="period_gap",
+        column="report_date",
+        frequency="month",
+        threshold=1.0,
+    )
+    result = _run(spark, df, check)
+
+    assert result["status"] == "PASS"

@@ -112,16 +112,70 @@ data issue it exists to catch.
 
 ### Completeness — no missing required fields or records
 
-**`completeness`** - a column must be non-null.
+**`completeness`** - a column must be non-null. Set `treat_blank_as_null:
+true` to also fail an empty/whitespace-only string - a common disguised-
+missing-value pattern (`""` stored instead of a true `NULL`) that a plain
+`IS NOT NULL` check silently passes.
 
 ```yaml
 - name: order_id_present
   type: completeness
   column: order_id
   severity: critical
-  threshold: 1.0          # 100% of rows must have a non-null order_id
+  threshold: 1.0             # 100% of rows must have a non-null order_id
+  treat_blank_as_null: true   # also fail "" - optional, default false
 ```
-Catches: blank/NULL mandatory fields (e.g. a NULL depot code).
+Catches: blank/NULL mandatory fields (e.g. a NULL depot code), and - with
+the flag - a source system writing `""` instead of `NULL`.
+
+**`sentinel_value`** - a column's non-null values must NOT be in
+`disallowed_values`. The inverse of `value_set`.
+
+```yaml
+- name: amount_not_sentinel_value
+  type: sentinel_value
+  column: amount
+  disallowed_values: [-1, 9999999]   # known placeholders the source uses instead of a true NULL
+  severity: warning
+  threshold: 1.0
+```
+Catches: a NULL that was silently replaced with a placeholder before it
+ever reached this table - `0`, `"N/A"`, `"9999-12-31"`, etc. - which
+`completeness` can't see, because the value genuinely isn't null. A real
+`NULL` still passes this check; that's `completeness`'s job, not this one's.
+
+**`coverage`** - every key in a reference dataset must appear at least once
+in this dataset. The reverse direction of `referential_integrity`.
+
+```yaml
+- name: every_active_store_has_orders_today
+  type: coverage
+  column: store_id
+  ref_dataset: active_stores   # must be a key in the ref_dfs dict / --ref-table
+  ref_column: store_id
+  severity: warning
+  threshold: 1.0
+```
+Catches: expected rows that are simply absent - a store with zero sales
+rows on a business day, an order with no order lines. `referential_integrity`
+only proves the rows that *do* exist aren't orphaned; it says nothing about
+rows that should exist but don't.
+
+**`period_gap`** - detects a missing period (day/month/year) inside the
+observed range of a date column - a hole in an otherwise continuous time
+series.
+
+```yaml
+- name: no_missing_months_in_trend
+  type: period_gap
+  column: report_date
+  frequency: month    # one of day / month / year (default: day)
+  severity: critical
+  threshold: 1.0
+```
+Catches: a missing month in a five-year trend, or any other gap in a
+sequence that `freshness` (only cares about the *latest* value) and
+`row_count` (can't see a hole in the middle of a populated table) both miss.
 
 **`row_count`** - the table's row count must fall within `min`/`max`.
 
@@ -368,9 +422,9 @@ historical slice (see above).
 
 ### `ref_dfs` — checks that compare against a second dataset
 
-`referential_integrity`, `accuracy`, `reconciliation`, and
-`cross_dataset_consistency` all read `check.ref_dataset` as a key into a
-`ref_dfs` dict you pass to `run()`:
+`referential_integrity`, `accuracy`, `reconciliation`,
+`cross_dataset_consistency`, and `coverage` all read `check.ref_dataset` as
+a key into a `ref_dfs` dict you pass to `run()`:
 
 ```python
 engine.run(df, config, ref_dfs={
@@ -419,17 +473,20 @@ it above; unused fields are just left `None`.
 | Field | Type | Used by |
 |---|---|---|
 | `name` | str (required) | all - must be unique within a config |
-| `type` | str (required) | all - one of the 15 types above |
+| `type` | str (required) | all - one of the 18 types above |
 | `severity` | `"critical"` \| `"warning"` (default `"warning"`) | all |
 | `threshold` | float 0.0-1.0 (default `1.0`) | all |
-| `column` | str | completeness, uniqueness, range, value_set, regex, referential_integrity, accuracy, reconciliation, cross_dataset_consistency, anomaly |
+| `column` | str | completeness, sentinel_value, coverage, period_gap, uniqueness, range, value_set, regex, referential_integrity, accuracy, reconciliation, cross_dataset_consistency, anomaly |
 | `columns` | list[str] | uniqueness (composite key), cross_dataset_consistency (group-by), immutability (fingerprint columns) |
+| `treat_blank_as_null` | bool (default `false`) | completeness |
+| `disallowed_values` | list | sentinel_value |
+| `frequency` | `"day"` \| `"month"` \| `"year"` (default `"day"`) | period_gap |
 | `min` / `max` | float | range, row_count |
 | `allowed_values` | list | value_set |
 | `pattern` | str | regex |
 | `expression` | str | expression |
-| `ref_dataset` | str | referential_integrity, accuracy, reconciliation, cross_dataset_consistency |
-| `ref_column` | str | referential_integrity (required), accuracy (optional, defaults to `column`) |
+| `ref_dataset` | str | referential_integrity, accuracy, reconciliation, cross_dataset_consistency, coverage |
+| `ref_column` | str | referential_integrity (required), coverage (required), accuracy (optional, defaults to `column`) |
 | `match_column` / `ref_match_column` | str | accuracy (`ref_match_column` optional, defaults to `match_column`) |
 | `max_age_hours` | float | freshness |
 | `expected_schema` | dict[str, str] | schema |
@@ -590,7 +647,7 @@ Dataset-level modules (each evaluated independently) expose:
 def evaluate(check, df, *, ref_df=None, history_df=None, dataset_name=None) -> CheckOutcome: ...
 ```
 
-Adding a 16th check type is: write a module matching one of those two
+Adding a new check type is: write a module matching one of those two
 shapes, add it to `VALID_CHECK_TYPES` in `models.py`, add one line to the
 registry dict in `checks/__init__.py`. `engine.py` never needs to change.
 
@@ -614,9 +671,10 @@ import pytest
 pytest.main(["-v", f"{PKG_ROOT}/tests/test_checks.py"])
 ```
 
-This has been run end-to-end on this workspace's serverless compute (13/13
-passing, covering all six of the added check types plus `filter_expression`).
-The `spark` fixture in `tests/conftest.py` detects when it's running inside
+This has been run end-to-end on this workspace's serverless compute (20/20
+passing, covering every check type added on top of the original nine plus
+`filter_expression` and `treat_blank_as_null`). The `spark` fixture in
+`tests/conftest.py` detects when it's running inside
 a Databricks notebook/job (`DATABRICKS_RUNTIME_VERSION` or `SPARK_REMOTE` in
 the environment) and reuses the ambient Spark session instead of trying to
 start a local one - serverless compute only speaks Spark Connect and rejects
@@ -645,7 +703,10 @@ package - included here so they don't get rediscovered:
 
 | type | dimension | what it checks | needs `ref_dfs` | needs `history_df` |
 |---|---|---|:---:|:---:|
-| `completeness` | Completeness | column is non-null | | |
+| `completeness` | Completeness | column is non-null (optionally: or blank) | | |
+| `sentinel_value` | Completeness | column isn't a disguised-null placeholder | | |
+| `coverage` | Completeness | every reference key appears in this dataset | ✅ | |
+| `period_gap` | Completeness | no missing day/month/year in a date range | | |
 | `row_count` | Completeness | row count within bounds | | |
 | `uniqueness` | Uniqueness | no duplicate values | | |
 | `range` | Validity | numeric value within min/max | | |

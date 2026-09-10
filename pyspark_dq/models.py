@@ -22,6 +22,9 @@ VALID_CHECK_TYPES = (
     "expression",
     "accuracy",
     "immutability",
+    "coverage",
+    "period_gap",
+    "sentinel_value",
 )
 
 
@@ -48,6 +51,9 @@ class CheckDefinition:
     match_column: Optional[str] = None
     ref_match_column: Optional[str] = None
     filter_expression: Optional[str] = None
+    treat_blank_as_null: Optional[bool] = None
+    disallowed_values: Optional[List[Any]] = None
+    frequency: Optional[str] = None
 
     def __post_init__(self) -> None:
         if self.type not in VALID_CHECK_TYPES:
