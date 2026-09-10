@@ -25,6 +25,9 @@ VALID_CHECK_TYPES = (
     "coverage",
     "period_gap",
     "sentinel_value",
+    "stale_record",
+    "derived_field",
+    "outlier",
 )
 
 
@@ -54,6 +57,8 @@ class CheckDefinition:
     treat_blank_as_null: Optional[bool] = None
     disallowed_values: Optional[List[Any]] = None
     frequency: Optional[str] = None
+    abs_tolerance: Optional[float] = None
+    num_std_dev: Optional[float] = None
 
     def __post_init__(self) -> None:
         if self.type not in VALID_CHECK_TYPES:
@@ -68,6 +73,10 @@ class CheckDefinition:
             raise ValueError(f"max_pct_change must be >= 0 in check '{self.name}'")
         if self.lookback is not None and self.lookback < 1:
             raise ValueError(f"lookback must be >= 1 in check '{self.name}'")
+        if self.abs_tolerance is not None and self.abs_tolerance < 0:
+            raise ValueError(f"abs_tolerance must be >= 0 in check '{self.name}'")
+        if self.num_std_dev is not None and self.num_std_dev <= 0:
+            raise ValueError(f"num_std_dev must be > 0 in check '{self.name}'")
 
 
 @dataclass

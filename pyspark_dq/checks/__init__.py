@@ -20,9 +20,11 @@ from . import (
     completeness,
     coverage,
     cross_dataset_consistency,
+    derived_field,
     expression,
     freshness,
     immutability,
+    outlier,
     period_gap,
     range as range_check,
     reconciliation,
@@ -31,6 +33,7 @@ from . import (
     row_count,
     schema as schema_check,
     sentinel_value,
+    stale_record,
     uniqueness,
     value_set,
 )
@@ -44,6 +47,9 @@ ROW_LEVEL_CHECKS = {
     "regex": regex_check,
     "expression": expression,
     "sentinel_value": sentinel_value,
+    "stale_record": stale_record,
+    "derived_field": derived_field,
+    "outlier": outlier,
 }
 
 # check.type -> module exposing evaluate(check, df, **kwargs) -> CheckOutcome.
@@ -74,14 +80,17 @@ __all__ = [
     "completeness",
     "coverage",
     "cross_dataset_consistency",
+    "derived_field",
     "expression",
     "freshness",
     "immutability",
+    "outlier",
     "period_gap",
     "reconciliation",
     "referential_integrity",
     "row_count",
     "sentinel_value",
+    "stale_record",
     "uniqueness",
     "value_set",
 ]

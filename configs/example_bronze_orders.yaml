@@ -3,9 +3,9 @@
 # just make sure something landed, the primary key exists (including
 # disguised-blank order_ids, not just true NULLs), no known placeholder
 # values snuck in instead of a real NULL, every active store actually shows
-# up today, and the schema hasn't drifted from what the ingestion job
-# expects. Bad *values* (e.g. an out-of-range amount) are expected at this
-# layer and get caught downstream.
+# up today, amount roughly agrees with quantity x unit_price, no single
+# order amount is a wild statistical outlier, and the schema hasn't drifted
+# from what the ingestion job expects.
 
 dataset: orders          # logical dataset name, recorded in every result row
 layer: bronze            # medallion layer, recorded in every result row - purely metadata
@@ -38,6 +38,21 @@ checks:
     severity: warning             # a quiet store is suspicious, not necessarily broken - start as a warning
     threshold: 1.0
 
+  - name: amount_matches_quantity_times_unit_price
+    type: derived_field
+    column: amount
+    expression: "quantity * unit_price"
+    abs_tolerance: 0.01              # allow a cent of rounding drift
+    severity: warning
+    threshold: 0.99
+
+  - name: amount_not_a_statistical_outlier
+    type: outlier
+    column: amount
+    num_std_dev: 4                    # a wider band than usual - bronze data is expected to be noisy
+    severity: warning
+    threshold: 0.999                   # a rare fat-fingered entry shouldn't halt the pipeline, just get flagged
+
   - name: expected_columns_present
     type: schema
     expected_schema:
@@ -45,6 +60,8 @@ checks:
       customer_id: string
       store_id: string
       amount: double
+      quantity: double
+      unit_price: double
       status: string
       created_at: timestamp
     severity: critical

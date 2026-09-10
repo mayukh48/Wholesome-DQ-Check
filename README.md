@@ -98,7 +98,7 @@ other feature in this document builds on exactly this.
 | `threshold` | The minimum pass rate (0.0-1.0) required for `status = PASS`. `1.0` means zero tolerance; `0.98` allows up to 2% of rows (or groups, or count drift) to be bad. |
 | `DQEngine` | Stateless except for holding a `SparkSession`. `run()` executes every check in a config against a DataFrame and returns a results DataFrame; `write_results()` appends it to a Delta table; `raise_on_critical_failures()` raises if anything critical failed. |
 | `CheckResult` / results table row | One row per check per run: status, pass_rate, total_rows, failed_rows, a human-readable message, plus `metric_value`/`metric_text` for checks that report a number or a fingerprint. Full schema in [The results table](#the-results-table). |
-| `ref_dfs` | A `{name: DataFrame}` dict passed to `run()`, for checks that compare against a second dataset (`referential_integrity`, `accuracy`, `reconciliation`, `cross_dataset_consistency`). |
+| `ref_dfs` | A `{name: DataFrame}` dict passed to `run()`, for checks that compare against a second dataset (`referential_integrity`, `accuracy`, `reconciliation`, `cross_dataset_consistency`, `coverage`). |
 | `history_df` | Prior rows from the results table, passed to `run()`, for checks that need a baseline from past runs (`anomaly`, `immutability`). |
 
 ---
@@ -302,7 +302,61 @@ doesn't mean the row's other attributes were mapped correctly.
   threshold: 1.0
 ```
 Catches: "depot mapped to the wrong state" - the depot is a valid depot, it's
-just linked to the wrong state.
+just linked to the wrong state. Also covers "wrong data source mapped" and
+"incorrect classification" - anywhere a value was populated from the wrong
+place - and, pointed at an FX-rate reference table, "using a stale exchange
+rate for a currency conversion."
+
+**`stale_record`** - `column`'s own value must be within `max_age_hours` of
+now, evaluated per row - not just the dataset's most recent value.
+
+```yaml
+- name: customer_address_not_stale
+  type: stale_record
+  column: updated_at
+  max_age_hours: 8760   # ~1 year
+  severity: warning
+  threshold: 0.95         # allow up to 5% of customers to be overdue for a refresh
+```
+Catches: "address not updated after customer moved" - a specific record
+that's gone stale while the rest of the table updates normally.
+`freshness` (Timeliness, below) only proves the *newest* row in the table
+is recent; it says nothing about an individual row nobody's touched.
+
+**`derived_field`** - a column's non-null values must equal `expression` (a
+formula over other columns), within `abs_tolerance` (default 0 = exact).
+
+```yaml
+- name: amount_matches_quantity_times_unit_price
+  type: derived_field
+  column: amount
+  expression: "quantity * unit_price"
+  abs_tolerance: 0.01     # allow a cent of rounding drift
+  severity: warning
+  threshold: 0.99
+```
+Catches: "total != sum of line items due to a formula error," or a currency
+amount truncated instead of rounded. (For a formula that spans two
+datasets - e.g. an order header's total vs. the sum of its own order
+lines - group both by the order key and use `cross_dataset_consistency`
+instead, below.)
+
+**`outlier`** - a column's non-null values must fall within `num_std_dev`
+(default 3) standard deviations of the dataset's own mean.
+
+```yaml
+- name: sensor_reading_not_an_outlier
+  type: outlier
+  column: reading
+  num_std_dev: 3
+  severity: warning
+  threshold: 0.999
+```
+Catches: a faulty IoT sensor or a fat-fingered manual entry - one row's
+value that's statistically implausible next to all the others *in this same
+run*. This is a different mechanism from `anomaly` (Timeliness, below),
+which compares one aggregate number *across runs*, not individual rows
+within one.
 
 ### Consistency — the same fact matches across tables/reports
 
@@ -473,22 +527,24 @@ it above; unused fields are just left `None`.
 | Field | Type | Used by |
 |---|---|---|
 | `name` | str (required) | all - must be unique within a config |
-| `type` | str (required) | all - one of the 18 types above |
+| `type` | str (required) | all - one of the 21 types above |
 | `severity` | `"critical"` \| `"warning"` (default `"warning"`) | all |
 | `threshold` | float 0.0-1.0 (default `1.0`) | all |
-| `column` | str | completeness, sentinel_value, coverage, period_gap, uniqueness, range, value_set, regex, referential_integrity, accuracy, reconciliation, cross_dataset_consistency, anomaly |
+| `column` | str | completeness, sentinel_value, coverage, period_gap, stale_record, derived_field, outlier, uniqueness, range, value_set, regex, referential_integrity, accuracy, reconciliation, cross_dataset_consistency, anomaly |
 | `columns` | list[str] | uniqueness (composite key), cross_dataset_consistency (group-by), immutability (fingerprint columns) |
 | `treat_blank_as_null` | bool (default `false`) | completeness |
 | `disallowed_values` | list | sentinel_value |
 | `frequency` | `"day"` \| `"month"` \| `"year"` (default `"day"`) | period_gap |
+| `abs_tolerance` | float ≥ 0 (default `0.0`) | derived_field |
+| `num_std_dev` | float > 0 (default `3.0`) | outlier |
 | `min` / `max` | float | range, row_count |
 | `allowed_values` | list | value_set |
 | `pattern` | str | regex |
-| `expression` | str | expression |
+| `expression` | str | expression, derived_field (the formula `column` should equal) |
 | `ref_dataset` | str | referential_integrity, accuracy, reconciliation, cross_dataset_consistency, coverage |
 | `ref_column` | str | referential_integrity (required), coverage (required), accuracy (optional, defaults to `column`) |
 | `match_column` / `ref_match_column` | str | accuracy (`ref_match_column` optional, defaults to `match_column`) |
-| `max_age_hours` | float | freshness |
+| `max_age_hours` | float | freshness, stale_record |
 | `expected_schema` | dict[str, str] | schema |
 | `tolerance` | float ≥ 0 (default `0.0`) | cross_dataset_consistency |
 | `max_pct_change` | float ≥ 0 (default `0.5`) | anomaly |
@@ -671,7 +727,7 @@ import pytest
 pytest.main(["-v", f"{PKG_ROOT}/tests/test_checks.py"])
 ```
 
-This has been run end-to-end on this workspace's serverless compute (20/20
+This has been run end-to-end on this workspace's serverless compute (26/26
 passing, covering every check type added on top of the original nine plus
 `filter_expression` and `treat_blank_as_null`). The `spark` fixture in
 `tests/conftest.py` detects when it's running inside
@@ -716,6 +772,9 @@ package - included here so they don't get rediscovered:
 | `expression` | Validity | arbitrary SQL predicate, per row | | |
 | `referential_integrity` | Accuracy | key exists in reference dataset | ✅ | |
 | `accuracy` | Accuracy | mapped attribute matches reference | ✅ | |
+| `stale_record` | Accuracy | this row's own timestamp isn't stale | | |
+| `derived_field` | Accuracy | column equals a formula, within tolerance | | |
+| `outlier` | Accuracy | value isn't a statistical outlier vs. this run | | |
 | `reconciliation` | Consistency | count/sum matches reference dataset | ✅ | |
 | `cross_dataset_consistency` | Consistency | per-group sum matches reference dataset | ✅ | |
 | `immutability` | Consistency | historical data unchanged since last run | | ✅ |

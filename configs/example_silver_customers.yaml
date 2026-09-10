@@ -59,6 +59,17 @@ checks:
     max_age_hours: 24
     severity: warning
 
+  - name: no_customer_record_is_stale
+    type: stale_record
+    column: updated_at
+    max_age_hours: 8760   # ~1 year - every individual customer's own record, not just the newest one
+    severity: warning
+    threshold: 0.95         # allow up to 5% of customers to be overdue for a refresh
+    # freshness (above) only proves the newest row in the table is recent -
+    # it says nothing about a specific customer whose address hasn't been
+    # touched in years while everyone else's updates regularly. This checks
+    # every row's own timestamp, not just the table's max.
+
   - name: raw_vs_silver_row_count
     type: reconciliation
     ref_dataset: raw_customers   # must match a key passed in --ref-table / ref_dfs

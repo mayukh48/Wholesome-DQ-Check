@@ -1,7 +1,8 @@
 """Tests for the gap-closing check types added on top of the original nine:
 reconciliation, cross_dataset_consistency, anomaly, expression, accuracy,
-immutability, coverage, period_gap, and sentinel_value - plus the generic
-filter_expression scoping feature and completeness's treat_blank_as_null."""
+immutability, coverage, period_gap, sentinel_value, stale_record,
+derived_field, and outlier - plus the generic filter_expression scoping
+feature and completeness's treat_blank_as_null."""
 from datetime import date, datetime, timedelta, timezone
 
 from pyspark_dq.engine import DQEngine
@@ -355,6 +356,106 @@ def test_period_gap_passes_when_no_gaps(spark):
         frequency="month",
         threshold=1.0,
     )
+    result = _run(spark, df, check)
+
+    assert result["status"] == "PASS"
+
+
+def test_stale_record_flags_old_per_row_timestamps(spark):
+    now = datetime.now(timezone.utc)
+    df = spark.createDataFrame(
+        [(1, now - timedelta(hours=1)), (2, now - timedelta(hours=48)), (3, None)],
+        ["id", "updated_at"],
+    )
+    check = CheckDefinition(
+        name="customer_record_is_fresh",
+        type="stale_record",
+        column="updated_at",
+        max_age_hours=24,
+        threshold=1.0,
+    )
+    result = _run(spark, df, check)
+
+    assert result["status"] == "FAIL"
+    assert result["failed_rows"] == 1  # only the 48h-old row fails; NULL is completeness's job
+    assert result["total_rows"] == 3
+
+
+def test_stale_record_passes_when_all_rows_are_recent(spark):
+    now = datetime.now(timezone.utc)
+    df = spark.createDataFrame(
+        [(1, now - timedelta(hours=1)), (2, now - timedelta(hours=2))],
+        ["id", "updated_at"],
+    )
+    check = CheckDefinition(
+        name="customer_record_is_fresh",
+        type="stale_record",
+        column="updated_at",
+        max_age_hours=24,
+        threshold=1.0,
+    )
+    result = _run(spark, df, check)
+
+    assert result["status"] == "PASS"
+
+
+def test_derived_field_flags_incorrect_totals(spark):
+    df = spark.createDataFrame(
+        [(1, 10.0, 2.0, 20.0), (2, 5.0, 3.0, 14.0)],  # row 2: 5*3=15, not 14
+        ["id", "unit_price", "quantity", "total"],
+    )
+    check = CheckDefinition(
+        name="total_matches_unit_price_times_quantity",
+        type="derived_field",
+        column="total",
+        expression="unit_price * quantity",
+        abs_tolerance=0.01,
+        threshold=1.0,
+    )
+    result = _run(spark, df, check)
+
+    assert result["status"] == "FAIL"
+    assert result["failed_rows"] == 1
+    assert result["total_rows"] == 2
+
+
+def test_derived_field_passes_within_tolerance(spark):
+    df = spark.createDataFrame([(1, 10.0, 2.0, 20.001)], ["id", "unit_price", "quantity", "total"])
+    check = CheckDefinition(
+        name="total_matches_unit_price_times_quantity",
+        type="derived_field",
+        column="total",
+        expression="unit_price * quantity",
+        abs_tolerance=0.01,
+        threshold=1.0,
+    )
+    result = _run(spark, df, check)
+
+    assert result["status"] == "PASS"
+
+
+def test_outlier_flags_a_statistically_implausible_reading(spark):
+    normal_readings = [(i, 20.0 + (i % 3) * 0.5) for i in range(20)]  # clustered ~20.0-21.0
+    df = spark.createDataFrame(normal_readings + [(999, 500.0)], ["sensor_id", "reading"])
+    check = CheckDefinition(
+        name="sensor_reading_not_an_outlier",
+        type="outlier",
+        column="reading",
+        num_std_dev=3.0,
+        threshold=1.0,
+    )
+    result = _run(spark, df, check)
+
+    assert result["status"] == "FAIL"
+    assert result["failed_rows"] == 1
+    assert result["total_rows"] == 21
+
+
+def test_outlier_passes_when_no_baseline_variance(spark):
+    # A single-row (or zero-variance) dataset has no baseline to judge an
+    # outlier against - this must not false-fail for lack of data.
+    df = spark.createDataFrame([(1, 20.0)], ["sensor_id", "reading"])
+    check = CheckDefinition(name="sensor_reading_not_an_outlier", type="outlier", column="reading")
     result = _run(spark, df, check)
 
     assert result["status"] == "PASS"
