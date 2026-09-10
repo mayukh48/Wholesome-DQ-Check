@@ -4,10 +4,11 @@
 # (country_code) against a reference dataset, reconcile row counts against
 # the raw bronze load, cross-check status against a second system (CRM) on
 # a different coding scheme, make sure this customer's SCD Type 2 version
-# history never has two overlapping "current" rows, and catch the same
-# person recorded twice under a slightly different spelling of their name.
-# Some checks are "warning" severity - they get recorded and are visible on
-# a dashboard, but a small rate of bad values won't halt the pipeline;
+# history never has two overlapping "current" rows, catch the same person
+# recorded twice under a slightly different spelling of their name, and
+# confirm this system's clock hasn't drifted too far from the CRM's. Some
+# checks are "warning" severity - they get recorded and are visible on a
+# dashboard, but a small rate of bad values won't halt the pipeline;
 # "critical" checks will.
 
 dataset: customers
@@ -128,3 +129,18 @@ checks:
     # under slightly different spellings. uniqueness only catches an exact
     # repeated value; this catches a near-match. The blocking key keeps the
     # row-to-row comparison from becoming an expensive full cross join.
+
+  - name: updated_at_matches_crm_clock
+    type: accuracy
+    column: customer_id
+    match_column: updated_at        # this system's clock
+    ref_dataset: crm                # must match a key passed in --ref-table / ref_dfs
+    ref_match_column: last_modified_at   # the CRM's clock for the same event
+    abs_tolerance: 300                    # allow up to 5 minutes of clock drift between the two systems
+    severity: warning
+    threshold: 0.98
+    # Catches "clock/timezone drift" between two systems: two clocks will
+    # never agree to the millisecond, so this allows a tolerance instead of
+    # value_map's exact-match comparison. Both sides are cast to double,
+    # which turns a timestamp into Unix epoch seconds - so abs_tolerance
+    # here is in seconds.

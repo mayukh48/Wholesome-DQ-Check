@@ -2,9 +2,9 @@
 reconciliation, cross_dataset_consistency, anomaly, expression, accuracy,
 immutability, coverage, period_gap, sentinel_value, stale_record,
 derived_field, outlier, scd_overlap, uniform_value, castable, length,
-fuzzy_duplicate, and cross_source_duplicate - plus the generic
-filter_expression scoping feature, completeness's treat_blank_as_null, and
-accuracy's value_map."""
+fuzzy_duplicate, cross_source_duplicate, and monotonicity - plus the
+generic filter_expression scoping feature, completeness's
+treat_blank_as_null, and accuracy's value_map/abs_tolerance."""
 from datetime import date, datetime, timedelta, timezone
 
 from pyspark_dq.engine import DQEngine
@@ -720,3 +720,88 @@ def test_cross_source_duplicate_passes_when_disjoint(spark):
     result = _run(spark, batch, check, ref_dfs={"already_loaded": already_loaded})
 
     assert result["status"] == "PASS"
+
+
+def test_monotonicity_flags_out_of_order_events(spark):
+    df = spark.createDataFrame(
+        [
+            ("D1", 1, datetime(2024, 1, 1, 10, 0)),
+            ("D1", 2, datetime(2024, 1, 1, 9, 30)),  # out of order vs. arrival_seq=1
+            ("D1", 3, datetime(2024, 1, 1, 10, 15)),
+            ("D2", 1, datetime(2024, 1, 1, 8, 0)),
+            ("D2", 2, datetime(2024, 1, 1, 8, 5)),
+        ],
+        ["device_id", "arrival_seq", "event_time"],
+    )
+    check = CheckDefinition(
+        name="events_arrive_in_order",
+        type="monotonicity",
+        column="event_time",
+        order_by="arrival_seq",
+        columns=["device_id"],
+        threshold=1.0,
+    )
+    result = _run(spark, df, check)
+
+    assert result["status"] == "FAIL"
+    assert result["failed_rows"] == 1
+    assert result["total_rows"] == 5
+
+
+def test_monotonicity_passes_when_events_are_in_order(spark):
+    df = spark.createDataFrame(
+        [
+            ("D1", 1, datetime(2024, 1, 1, 10, 0)),
+            ("D1", 2, datetime(2024, 1, 1, 10, 5)),
+        ],
+        ["device_id", "arrival_seq", "event_time"],
+    )
+    check = CheckDefinition(
+        name="events_arrive_in_order",
+        type="monotonicity",
+        column="event_time",
+        order_by="arrival_seq",
+        columns=["device_id"],
+    )
+    result = _run(spark, df, check)
+
+    assert result["status"] == "PASS"
+
+
+def test_accuracy_abs_tolerance_allows_small_clock_drift(spark):
+    now = datetime.now(timezone.utc)
+    df = spark.createDataFrame([("E1", now)], ["event_id", "local_ts"])
+    ref_df = spark.createDataFrame([("E1", now + timedelta(seconds=30))], ["event_id", "source_ts"])
+    check = CheckDefinition(
+        name="clocks_agree_within_tolerance",
+        type="accuracy",
+        column="event_id",
+        match_column="local_ts",
+        ref_dataset="source_system",
+        ref_match_column="source_ts",
+        abs_tolerance=60,  # seconds
+        threshold=1.0,
+    )
+    result = _run(spark, df, check, ref_dfs={"source_system": ref_df})
+
+    assert result["status"] == "PASS"
+
+
+def test_accuracy_abs_tolerance_flags_significant_drift(spark):
+    now = datetime.now(timezone.utc)
+    df = spark.createDataFrame([("E1", now)], ["event_id", "local_ts"])
+    ref_df = spark.createDataFrame([("E1", now + timedelta(minutes=10))], ["event_id", "source_ts"])
+    check = CheckDefinition(
+        name="clocks_agree_within_tolerance",
+        type="accuracy",
+        column="event_id",
+        match_column="local_ts",
+        ref_dataset="source_system",
+        ref_match_column="source_ts",
+        abs_tolerance=60,
+        threshold=1.0,
+    )
+    result = _run(spark, df, check, ref_dfs={"source_system": ref_df})
+
+    assert result["status"] == "FAIL"
+    assert result["failed_rows"] == 1

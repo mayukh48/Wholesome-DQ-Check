@@ -7,8 +7,8 @@
 # quantity x unit_price, no single order amount is a wild statistical
 # outlier, the raw landed date string is actually a real date (not just
 # date-shaped), a backfill isn't about to re-insert orders already in the
-# target table, and the schema hasn't drifted from what the ingestion job
-# expects.
+# target table, orders arrive in event-time order per store, and the schema
+# hasn't drifted from what the ingestion job expects.
 
 dataset: orders          # logical dataset name, recorded in every result row
 layer: bronze            # medallion layer, recorded in every result row - purely metadata
@@ -96,6 +96,18 @@ checks:
     # source system's orders instead to catch "duplicate across merge/union
     # sources" - the same overlap check, different reference dataset.
 
+  - name: orders_arrive_in_event_time_order
+    type: monotonicity
+    column: created_at           # event time - when the order actually happened
+    order_by: ingestion_offset    # arrival order - a strictly increasing per-batch sequence/offset
+    columns: [store_id]            # check ordering per store, not across the whole feed
+    severity: warning
+    threshold: 0.98
+    # Catches "out-of-order events": an order whose event timestamp is
+    # earlier than an order that arrived before it for the same store -
+    # a sign of stream replay, clock skew at the source, or a race in
+    # upstream buffering.
+
   - name: expected_columns_present
     type: schema
     expected_schema:
@@ -109,4 +121,5 @@ checks:
       status: string
       created_at: timestamp
       created_at_raw: string
+      ingestion_offset: long
     severity: critical

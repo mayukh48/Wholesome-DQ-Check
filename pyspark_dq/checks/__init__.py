@@ -28,6 +28,7 @@ from . import (
     fuzzy_duplicate,
     immutability,
     length,
+    monotonicity,
     outlier,
     period_gap,
     range as range_check,
@@ -58,6 +59,7 @@ ROW_LEVEL_CHECKS = {
     "outlier": outlier,
     "castable": castable,
     "length": length,
+    "monotonicity": monotonicity,
 }
 
 # check.type -> module exposing evaluate(check, df, **kwargs) -> CheckOutcome.
@@ -100,6 +102,7 @@ __all__ = [
     "fuzzy_duplicate",
     "immutability",
     "length",
+    "monotonicity",
     "outlier",
     "period_gap",
     "reconciliation",

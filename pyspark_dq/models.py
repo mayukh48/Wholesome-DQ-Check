@@ -34,6 +34,7 @@ VALID_CHECK_TYPES = (
     "length",
     "fuzzy_duplicate",
     "cross_source_duplicate",
+    "monotonicity",
 )
 
 
@@ -70,6 +71,7 @@ class CheckDefinition:
     value_map: Optional[Dict[Any, Any]] = None
     target_type: Optional[str] = None
     max_edit_distance: Optional[int] = None
+    order_by: Optional[str] = None
 
     def __post_init__(self) -> None:
         if self.type not in VALID_CHECK_TYPES:

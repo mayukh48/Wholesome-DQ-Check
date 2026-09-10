@@ -16,6 +16,16 @@ same fact - e.g. this dataset stores "Y"/"N" but the reference stores
 mismatch. A raw value with no entry in `value_map` is treated as a mismatch
 (an unrecognized code is itself an accuracy problem worth surfacing, not
 something to silently skip).
+
+Set `abs_tolerance` when the two systems' values are expected to agree only
+*approximately*, not exactly - most commonly two clocks: compare a
+timestamp column against a reference system's timestamp for the same
+event/entity, allowing up to `abs_tolerance` seconds of drift, instead of
+requiring an exact match neither clock can realistically produce. Both
+sides are cast to `double` before differencing, which turns a timestamp
+into Unix epoch seconds automatically - so `abs_tolerance` is in seconds
+for a timestamp `match_column`, or in the column's own units for a plain
+numeric one.
 """
 from __future__ import annotations
 
@@ -53,7 +63,10 @@ def evaluate(
     joined = left.join(right, on=check.column, how="inner")
 
     raw_value = F.col(check.match_column)
-    if check.value_map:
+    if check.abs_tolerance is not None:
+        diff = F.abs(raw_value.cast("double") - F.col("_dq_ref_value").cast("double"))
+        mismatch_condition = raw_value.isNotNull() & (diff.isNull() | (diff > check.abs_tolerance))
+    elif check.value_map:
         map_items = []
         for k, v in check.value_map.items():
             map_items.append(F.lit(k))

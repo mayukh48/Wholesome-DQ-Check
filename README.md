@@ -424,6 +424,27 @@ isn't a false mismatch. A raw value with no entry in `value_map` still
 counts as a mismatch (an unrecognized code is itself worth flagging, not
 something to silently skip).
 
+Set `abs_tolerance` instead when the two systems' values should agree only
+*approximately* - most commonly two clocks:
+
+```yaml
+- name: updated_at_matches_crm_clock
+  type: accuracy
+  column: customer_id
+  match_column: updated_at             # this system's clock
+  ref_dataset: crm
+  ref_match_column: last_modified_at    # the CRM's clock for the same event
+  abs_tolerance: 300                     # allow up to 5 minutes of drift
+  severity: warning
+  threshold: 0.98
+```
+Catches: "clock/timezone drift" between two systems - two clocks will never
+agree to the millisecond, so this allows a tolerance instead of requiring
+an exact match. Both sides are cast to `double` before differencing, which
+turns a timestamp into Unix epoch seconds automatically - so
+`abs_tolerance` is in seconds for a timestamp `match_column`, or in the
+column's own units for a plain numeric one.
+
 **`stale_record`** - `column`'s own value must be within `max_age_hours` of
 now, evaluated per row - not just the dataset's most recent value.
 
@@ -490,9 +511,11 @@ idempotency guard.
   threshold: 0.99                # allow up to 1% row loss between raw and cleansed, e.g. from dedup
 ```
 Catches: rows silently dropped (or duplicated) between two stages of the
-pipeline - "raw vs. processed record counts don't match," and "duplicate
-due to reprocessing" (a pipeline re-run without idempotency double-counting
-rows) when `ref_dataset` points at an "already loaded batches" marker.
+pipeline - "raw vs. processed record counts don't match," "duplicate due to
+reprocessing" (a pipeline re-run without idempotency double-counting rows)
+when `ref_dataset` points at an "already loaded batches" marker, and
+"real-time vs. batch latency mismatch" causing reconciliation gaps when
+`ref_dataset` points at the other layer (streaming vs. batch).
 
 **`cross_dataset_consistency`** - a summed column, grouped by one or more
 dimensions, must match a reference dataset per group.
@@ -577,10 +600,35 @@ split still gets flagged even without knowing in advance which value is
   max_age_hours: 30      # allow some slack past the 24h reporting cycle
   severity: critical
 ```
-Catches: a scheduled job that ran but didn't actually pick up new data
-(stale source), *if* this check itself is run on a schedule independent of
-whether the upstream job succeeded - see the note in
-["What's still out of scope, on purpose"](#whats-still-out-of-scope-on-purpose).
+Catches: "stale data" and "delayed batch jobs" - a scheduled job that ran
+but didn't actually pick up new data (stale source), *if* this check itself
+is run on a schedule independent of whether the upstream job succeeded -
+see the note in ["What's still out of scope, on
+purpose"](#whats-still-out-of-scope-on-purpose). Also covers "missed
+SLA/refresh window" (set `max_age_hours` to the contractual refresh
+frequency); for "late-arriving data past an SLA cutoff," pair `row_count`
+(`min: 1`) with `filter_expression` scoped to today's expected arrival
+window instead, with the same orchestration-timing caveat.
+
+**`monotonicity`** - `column` must never decrease when rows are ordered by
+`order_by`. Optionally scoped to `columns` (checked separately within each
+partition).
+
+```yaml
+- name: events_arrive_in_order
+  type: monotonicity
+  column: event_time      # must never decrease...
+  order_by: arrival_seq     # ...as arrival_seq increases
+  columns: [device_id]        # check ordering per device, not across the whole feed
+  severity: warning
+  threshold: 0.98
+```
+Catches: "out-of-order events" in stream processing - an event whose
+timestamp is earlier than the previous one for the same entity, despite
+arriving later. Uses a window `LAG` (the same pattern `uniqueness` uses) to
+compare each row against its predecessor in `order_by` order; without a
+`columns` partition key this forces a single-partition sort, so scope it on
+anything large.
 
 **`anomaly`** - a summed column (or row count) shouldn't swing more than
 `max_pct_change` versus the average of the last `lookback` runs. Bridges
@@ -686,16 +734,17 @@ it above; unused fields are just left `None`.
 | Field | Type | Used by |
 |---|---|---|
 | `name` | str (required) | all - must be unique within a config |
-| `type` | str (required) | all - one of the 27 types above |
+| `type` | str (required) | all - one of the 28 types above |
 | `severity` | `"critical"` \| `"warning"` (default `"warning"`) | all |
 | `threshold` | float 0.0-1.0 (default `1.0`) | all |
-| `column` | str | completeness, sentinel_value, coverage, period_gap, stale_record, derived_field, outlier, uniform_value, castable, length, fuzzy_duplicate, cross_source_duplicate, uniqueness, range, value_set, regex, referential_integrity, accuracy, reconciliation, cross_dataset_consistency, anomaly |
-| `columns` | list[str] | uniqueness (composite key), cross_dataset_consistency (group-by), immutability (fingerprint columns), scd_overlap (entity key), fuzzy_duplicate (optional blocking key) |
+| `column` | str | completeness, sentinel_value, coverage, period_gap, stale_record, derived_field, outlier, uniform_value, castable, length, fuzzy_duplicate, cross_source_duplicate, monotonicity, uniqueness, range, value_set, regex, referential_integrity, accuracy, reconciliation, cross_dataset_consistency, anomaly |
+| `columns` | list[str] | uniqueness (composite key), cross_dataset_consistency (group-by), immutability (fingerprint columns), scd_overlap (entity key), fuzzy_duplicate (optional blocking key), monotonicity (optional partition key) |
+| `order_by` | str | monotonicity (required - the column defining arrival order) |
 | `max_edit_distance` | int ≥ 0 (default `2`) | fuzzy_duplicate |
 | `treat_blank_as_null` | bool (default `false`) | completeness |
 | `disallowed_values` | list | sentinel_value |
 | `frequency` | `"day"` \| `"month"` \| `"year"` (default `"day"`) | period_gap |
-| `abs_tolerance` | float ≥ 0 (default `0.0`) | derived_field |
+| `abs_tolerance` | float ≥ 0 (default `0.0`) | derived_field, accuracy (optional - switches from exact match to a tolerance comparison) |
 | `num_std_dev` | float > 0 (default `3.0`) | outlier |
 | `start_column` / `end_column` | str | scd_overlap (both required; `end_column` may be `NULL` per row = "still current") |
 | `value_map` | dict | accuracy (translates this side's raw value before comparing) |
@@ -890,7 +939,7 @@ import pytest
 pytest.main(["-v", f"{PKG_ROOT}/tests/test_checks.py"])
 ```
 
-This has been run end-to-end on this workspace's serverless compute (43/43
+This has been run end-to-end on this workspace's serverless compute (47/47
 passing, covering every check type added on top of the original nine plus
 `filter_expression` and `treat_blank_as_null`). The `spark` fixture in
 `tests/conftest.py` detects when it's running inside
@@ -948,4 +997,5 @@ package - included here so they don't get rediscovered:
 | `scd_overlap` | Consistency | no two entity versions have overlapping date ranges | | |
 | `uniform_value` | Consistency | column doesn't silently mix values (units/codes) | | |
 | `freshness` | Timeliness | latest timestamp isn't stale | | |
+| `monotonicity` | Timeliness | value never decreases in arrival order | | |
 | `anomaly` | Timeliness / Volume | metric isn't a big swing vs. history | | ✅ |
