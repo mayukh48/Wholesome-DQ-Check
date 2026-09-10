@@ -36,6 +36,7 @@ VALID_CHECK_TYPES = (
     "cross_source_duplicate",
     "monotonicity",
     "no_circular_reference",
+    "format_consistency",
 )
 
 
@@ -77,6 +78,8 @@ class CheckDefinition:
     max_depth: Optional[int] = None
     strict: Optional[bool] = None
     enforce_order: Optional[bool] = None
+    format_patterns: Optional[List[str]] = None
+    trim_whitespace: Optional[bool] = None
 
     def __post_init__(self) -> None:
         if self.type not in VALID_CHECK_TYPES:

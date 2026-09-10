@@ -6,11 +6,11 @@
 # every active store actually shows up today, amount roughly agrees with
 # quantity x unit_price, no single order amount is a wild statistical
 # outlier, the raw landed date string is actually a real date (not just
-# date-shaped), a backfill isn't about to re-insert orders already in the
-# target table, orders arrive in event-time order per store, a semi-
-# structured array column hasn't blown up in size, and the schema is
-# exactly what the ingestion job expects - no drift, no surprise extra
-# columns, no reordering.
+# date-shaped) and isn't silently mixing multiple date formats, a backfill
+# isn't about to re-insert orders already in the target table, orders
+# arrive in event-time order per store, a semi-structured array column
+# hasn't blown up in size, and the schema is exactly what the ingestion job
+# expects - no drift, no surprise extra columns, no reordering.
 
 dataset: orders          # logical dataset name, recorded in every result row
 layer: bronze            # medallion layer, recorded in every result row - purely metadata
@@ -109,6 +109,21 @@ checks:
     # earlier than an order that arrived before it for the same store -
     # a sign of stream replay, clock skew at the source, or a race in
     # upstream buffering.
+
+  - name: created_at_raw_format_is_consistent
+    type: format_consistency
+    column: created_at_raw
+    format_patterns:
+      - '^\d{4}-\d{2}-\d{2}'         # ISO: YYYY-MM-DD...
+      - '^\d{2}/\d{2}/\d{4}$'          # US: MM/DD/YYYY
+    severity: warning
+    threshold: 0.98
+    # Catches "MM/DD/YYYY vs DD-MM-YYYY mixed in the same field" - and the
+    # same mechanism, pointed at a numeric-looking string column with
+    # patterns for "1,234.56" vs "1.234,56", catches locale-specific decimal
+    # separator confusion too. Different from castable: castable validates
+    # against one known-correct type; this detects mixing among several
+    # acceptable ones without needing to know upfront which is "the" format.
 
   - name: tags_array_size_is_reasonable
     type: length

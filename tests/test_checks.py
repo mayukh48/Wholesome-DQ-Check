@@ -2,11 +2,11 @@
 reconciliation, cross_dataset_consistency, anomaly, expression, accuracy,
 immutability, coverage, period_gap, sentinel_value, stale_record,
 derived_field, outlier, scd_overlap, uniform_value, castable, length,
-fuzzy_duplicate, cross_source_duplicate, monotonicity, and
-no_circular_reference - plus the generic filter_expression scoping
-feature, completeness's treat_blank_as_null, accuracy's
-value_map/abs_tolerance, schema's strict/enforce_order, and length's
-array/map size support."""
+fuzzy_duplicate, cross_source_duplicate, monotonicity,
+no_circular_reference, and format_consistency - plus the generic
+filter_expression scoping feature, completeness's treat_blank_as_null,
+accuracy's value_map/abs_tolerance, schema's strict/enforce_order,
+length's array/map size support, and uniqueness's trim_whitespace."""
 from datetime import date, datetime, timedelta, timezone
 
 from pyspark_dq.engine import DQEngine
@@ -947,3 +947,72 @@ def test_length_array_size_passes_within_bounds(spark):
     result = _run(spark, df, check)
 
     assert result["status"] == "PASS"
+
+
+def test_format_consistency_flags_mixed_date_formats(spark):
+    df = spark.createDataFrame(
+        [(1, "01/15/2024"), (2, "02/20/2024"), (3, "15-03-2024")], ["id", "raw_date"]
+    )
+    check = CheckDefinition(
+        name="date_format_is_consistent",
+        type="format_consistency",
+        column="raw_date",
+        format_patterns=[r"^\d{2}/\d{2}/\d{4}$", r"^\d{2}-\d{2}-\d{4}$"],
+        threshold=1.0,
+    )
+    result = _run(spark, df, check)
+
+    assert result["status"] == "FAIL"
+    assert result["failed_rows"] == 1  # the one DD-MM-YYYY row disagrees with the MM/DD/YYYY majority
+    assert result["total_rows"] == 3
+
+
+def test_format_consistency_passes_when_all_same_format(spark):
+    df = spark.createDataFrame([(1, "01/15/2024"), (2, "02/20/2024")], ["id", "raw_date"])
+    check = CheckDefinition(
+        name="date_format_is_consistent",
+        type="format_consistency",
+        column="raw_date",
+        format_patterns=[r"^\d{2}/\d{2}/\d{4}$", r"^\d{2}-\d{2}-\d{4}$"],
+        threshold=1.0,
+    )
+    result = _run(spark, df, check)
+
+    assert result["status"] == "PASS"
+
+
+def test_format_consistency_counts_unrecognized_values_as_failures(spark):
+    df = spark.createDataFrame(
+        [(1, "01/15/2024"), (2, "02/20/2024"), (3, "not-a-date")], ["id", "raw_date"]
+    )
+    check = CheckDefinition(
+        name="date_format_is_consistent",
+        type="format_consistency",
+        column="raw_date",
+        format_patterns=[r"^\d{2}/\d{2}/\d{4}$"],
+        threshold=1.0,
+    )
+    result = _run(spark, df, check)
+
+    assert result["status"] == "FAIL"
+    assert result["failed_rows"] == 1
+    assert "unrecognized" in result["message"]
+
+
+def test_uniqueness_trim_whitespace_catches_hidden_duplicates(spark):
+    df = spark.createDataFrame([(1, " John "), (2, "John")], ["id", "name"])
+    check = CheckDefinition(
+        name="name_is_unique", type="uniqueness", column="name", trim_whitespace=True, threshold=1.0
+    )
+    result = _run(spark, df, check)
+
+    assert result["status"] == "FAIL"
+    assert result["failed_rows"] == 2
+
+
+def test_uniqueness_without_trim_whitespace_misses_the_duplicate(spark):
+    df = spark.createDataFrame([(1, " John "), (2, "John")], ["id", "name"])
+    check = CheckDefinition(name="name_is_unique", type="uniqueness", column="name", threshold=1.0)
+    result = _run(spark, df, check)
+
+    assert result["status"] == "PASS"  # without trimming, " John " and "John" look like different keys

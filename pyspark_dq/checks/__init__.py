@@ -24,6 +24,7 @@ from . import (
     cross_source_duplicate,
     derived_field,
     expression,
+    format_consistency,
     freshness,
     fuzzy_duplicate,
     immutability,
@@ -81,6 +82,7 @@ DATASET_LEVEL_CHECKS = {
     "fuzzy_duplicate": fuzzy_duplicate,
     "cross_source_duplicate": cross_source_duplicate,
     "no_circular_reference": no_circular_reference,
+    "format_consistency": format_consistency,
 }
 
 ROW_LEVEL_TYPES = set(ROW_LEVEL_CHECKS)
@@ -100,6 +102,7 @@ __all__ = [
     "cross_source_duplicate",
     "derived_field",
     "expression",
+    "format_consistency",
     "freshness",
     "fuzzy_duplicate",
     "immutability",

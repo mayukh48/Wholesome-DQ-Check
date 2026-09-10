@@ -1,6 +1,7 @@
 # Example config for a SILVER-layer table.
 # Silver is cleaned/conformed data, so we tighten checks: enforce uniqueness
-# of the primary key, validate value ranges/formats, check a foreign key
+# of the primary key (trimmed, so accidental whitespace from a CSV export
+# can't hide a real duplicate), validate value ranges/formats, check a foreign key
 # (country_code) against a reference dataset, reconcile row counts against
 # the raw bronze load, cross-check status against a second system (CRM) on
 # a different coding scheme, make sure this customer's SCD Type 2 version
@@ -25,6 +26,7 @@ checks:
   - name: customer_id_unique
     type: uniqueness
     columns: [customer_id]      # use `columns` (list) for composite keys, `column` also works for a single key
+    trim_whitespace: true         # a CSV export padding "C1001 " would otherwise hide a real duplicate of "C1001"
     severity: critical
     threshold: 1.0
 

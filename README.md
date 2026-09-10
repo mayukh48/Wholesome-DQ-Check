@@ -197,6 +197,7 @@ tighter volume floor/ceiling, e.g. `min: 1000, max: 200000`).
 - name: customer_id_unique
   type: uniqueness
   columns: [customer_id]   # use `columns` (list) for a composite key; `column` also works for a single key
+  trim_whitespace: true      # compare trimmed values - without this, " C1001" and "C1001" look like different keys
   severity: critical
   threshold: 1.0
 ```
@@ -205,7 +206,9 @@ outlet/customer/order appearing twice - and, via `columns`, "composite key
 duplication" (uniqueness violated only when checked across several columns
 together, e.g. `columns: [store_id, sku, sale_date]`). Rows with a null key
 are excluded (that's `completeness`'s job) so they never count as
-duplicates.
+duplicates. Set `trim_whitespace: true` to also catch "whitespace/trailing
+space issues" - `" John "` and `"John"` otherwise compare as distinct keys,
+silently hiding a real duplicate from detection.
 
 **`fuzzy_duplicate`** - flags rows whose `column` is a near-match (edit
 distance ≤ `max_edit_distance`, default 2) of another row's, not just an
@@ -315,11 +318,16 @@ Exact match, case-sensitive by default.
 Catches an unrecognized/misspelled enum value ("Pnding" instead of
 "Pending") and - because the match is case-sensitive - a "case sensitivity
 violation" too (an enum stored as "Pending" when only "PENDING" is
-allowed fails this exactly as it should). Paired with `completeness` on a
-grain-discriminator column (e.g. `period_type: DAILY|MONTHLY`), this also
-catches "inconsistent grain" - a table silently mixing daily and monthly
-rows - by making sure every row is explicitly tagged with a valid grain
-instead of leaving it to guesswork.
+allowed fails this exactly as it should). Also covers "inconsistent naming
+conventions" ("NY" vs. "N.Y." vs. "New York" for the same value) and
+"non-standardized units of measure" ("kg" vs. "Kg" vs. "kilograms") by
+pinning the one canonical spelling as the only `allowed_values` entry - if
+you don't know the canonical form upfront and just want to detect a split,
+use `uniform_value` (Consistency, below) instead. Paired with `completeness`
+on a grain-discriminator column (e.g. `period_type: DAILY|MONTHLY`), this
+also catches "inconsistent grain" - a table silently mixing daily and
+monthly rows - by making sure every row is explicitly tagged with a valid
+grain instead of leaving it to guesswork.
 
 **`regex`** - a column's non-null values must match a pattern.
 
@@ -334,7 +342,33 @@ instead of leaving it to guesswork.
 Catches "pattern/regex violations" (a missing `@`, a malformed phone
 number) and, with a pattern restricted to expected character ranges (e.g.
 `^[\x20-\x7E]*$` for printable ASCII), "encoding violations" - non-UTF8
-bytes producing garbled/mojibake text.
+bytes producing garbled/mojibake text - and "special character handling"
+issues, e.g. a pattern like `'^[^\t\n\r"]*$'` to reject unescaped tabs,
+newlines, or quotes within a field.
+
+**`format_consistency`** - `column`'s non-null values should all use the
+same one of several possible representations, without needing to know
+upfront which one is "correct." `format_patterns` is a list of regex
+patterns for the distinct acceptable formats; the majority format among
+recognized values becomes the baseline.
+
+```yaml
+- name: created_at_raw_format_is_consistent
+  type: format_consistency
+  column: created_at_raw
+  format_patterns:
+    - '^\d{4}-\d{2}-\d{2}'    # ISO: YYYY-MM-DD...
+    - '^\d{2}/\d{2}/\d{4}$'     # US: MM/DD/YYYY
+  severity: warning
+  threshold: 0.98
+```
+Catches "inconsistent date/time formats" - "MM/DD/YYYY" and "DD-MM-YYYY"
+mixed in the same field - and, pointed at a numeric-looking string column
+with patterns for `"1,234.56"` vs. `"1.234,56"`, "locale-specific
+formatting issues" (decimal comma vs. decimal point confusion). Different
+from `regex`: `regex` validates against one already-known-correct pattern;
+this is for when there should be exactly one format, but you don't know in
+advance which one.
 
 **`schema`** - the DataFrame's actual dtypes must match an expected map.
 Metadata-only (`df.dtypes`, no Spark job triggered), so this is essentially
@@ -785,15 +819,17 @@ it above; unused fields are just left `None`.
 | Field | Type | Used by |
 |---|---|---|
 | `name` | str (required) | all - must be unique within a config |
-| `type` | str (required) | all - one of the 29 types above |
+| `type` | str (required) | all - one of the 30 types above |
 | `severity` | `"critical"` \| `"warning"` (default `"warning"`) | all |
 | `threshold` | float 0.0-1.0 (default `1.0`) | all |
-| `column` | str | completeness, sentinel_value, coverage, period_gap, stale_record, derived_field, outlier, uniform_value, castable, length, fuzzy_duplicate, cross_source_duplicate, monotonicity, no_circular_reference, uniqueness, range, value_set, regex, referential_integrity, accuracy, reconciliation, cross_dataset_consistency, anomaly |
+| `column` | str | completeness, sentinel_value, coverage, period_gap, stale_record, derived_field, outlier, uniform_value, castable, length, fuzzy_duplicate, cross_source_duplicate, monotonicity, no_circular_reference, format_consistency, uniqueness, range, value_set, regex, referential_integrity, accuracy, reconciliation, cross_dataset_consistency, anomaly |
 | `columns` | list[str] | uniqueness (composite key), cross_dataset_consistency (group-by), immutability (fingerprint columns), scd_overlap (entity key), fuzzy_duplicate (optional blocking key), monotonicity (optional partition key) |
 | `order_by` | str | monotonicity (required - the column defining arrival order) |
 | `parent_column` | str | no_circular_reference (required) |
 | `max_depth` | int ≥ 1 (default `20`) | no_circular_reference |
 | `max_edit_distance` | int ≥ 0 (default `2`) | fuzzy_duplicate |
+| `format_patterns` | list[str] | format_consistency (required) |
+| `trim_whitespace` | bool (default `false`) | uniqueness |
 | `treat_blank_as_null` | bool (default `false`) | completeness |
 | `disallowed_values` | list | sentinel_value |
 | `frequency` | `"day"` \| `"month"` \| `"year"` (default `"day"`) | period_gap |
@@ -994,7 +1030,7 @@ import pytest
 pytest.main(["-v", f"{PKG_ROOT}/tests/test_checks.py"])
 ```
 
-This has been run end-to-end on this workspace's serverless compute (57/57
+This has been run end-to-end on this workspace's serverless compute (62/62
 passing, covering every check type added on top of the original nine plus
 `filter_expression` and `treat_blank_as_null`). The `spark` fixture in
 `tests/conftest.py` detects when it's running inside
@@ -1039,6 +1075,7 @@ package - included here so they don't get rediscovered:
 | `castable` | Validity | value actually converts to a target type | | |
 | `value_set` | Validity | value in an allow-list | | |
 | `regex` | Validity | value matches a pattern | | |
+| `format_consistency` | Validity | column isn't silently mixing formats | | |
 | `schema` | Validity | dtypes (and optionally column set/order) match expected | | |
 | `expression` | Validity | arbitrary SQL predicate, per row | | |
 | `referential_integrity` | Accuracy | key exists in reference dataset | ✅ | |
