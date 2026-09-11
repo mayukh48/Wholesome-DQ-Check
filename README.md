@@ -399,13 +399,16 @@ schema drift too, not just flat top-level columns.
 ```
 Catches: "schema drift," "data type drift," and "metadata schema mismatch"
 - a source column silently renamed, retyped, or dropped, or a data catalog
-schema that no longer matches the actual table. Set `strict: true` to also
-catch "unexpected/extra columns" - a new, unmapped column quietly showing
-up in the feed - which isn't a failure by default (an unlisted column
-existing isn't inherently wrong). Set `enforce_order: true` to also catch
-"column order dependency failure" - a pipeline that assumed a fixed column
-position breaking when the source reorders them; most pipelines bind by
-name and genuinely don't care, so this isn't checked by default either.
+schema that no longer matches the actual table - which doubles as a
+"versioning issues" alarm: a schema check that starts failing *is* the
+detection that the schema changed without whatever version control was
+supposed to be tracking it. Set `strict: true` to also catch "unexpected/
+extra columns" - a new, unmapped column quietly showing up in the feed -
+which isn't a failure by default (an unlisted column existing isn't
+inherently wrong). Set `enforce_order: true` to also catch "column order
+dependency failure" - a pipeline that assumed a fixed column position
+breaking when the source reorders them; most pipelines bind by name and
+genuinely don't care, so this isn't checked by default either.
 
 **`expression`** - any SQL boolean predicate, evaluated per row. The
 open-ended escape hatch for business rules that don't fit another type.
@@ -570,7 +573,10 @@ Catches: "total != sum of line items due to a formula error," or a currency
 amount truncated instead of rounded. (For a formula that spans two
 datasets - e.g. an order header's total vs. the sum of its own order
 lines - group both by the order key and use `cross_dataset_consistency`
-instead, below.)
+instead, below.) Also the fix for "undocumented assumptions in derived
+fields" - a calculated KPI whose logic wasn't traceable to any rule: once
+the formula is a `derived_field` check, the config *is* the rule,
+versioned and enforced instead of buried in a notebook.
 
 **`outlier`** - a column's non-null values must fall within `num_std_dev`
 (default 3) standard deviations of the dataset's own mean.
@@ -651,6 +657,10 @@ recorded for this check in the last run.
 Catches: someone silently re-ran a pipeline over a past month and changed
 numbers that should have been frozen - current-period rows are expected to
 change and are excluded by `filter_expression`, so they never trip this.
+Applied to a reference/lookup table, it's also a "versioning issues" alarm
+for data that isn't under formal SCD Type 2 control (see `scd_overlap`,
+above, for tables that are): any unexpected change gets flagged even
+without a version history to check against.
 
 **`scd_overlap`** - no two rows for the same entity (`columns`) may have
 overlapping `[start_column, end_column)` validity windows. A `NULL`
@@ -707,9 +717,12 @@ is run on a schedule independent of whether the upstream job succeeded -
 see the note in ["What's still out of scope, on
 purpose"](#whats-still-out-of-scope-on-purpose). Also covers "missed
 SLA/refresh window" (set `max_age_hours` to the contractual refresh
-frequency); for "late-arriving data past an SLA cutoff," pair `row_count`
-(`min: 1`) with `filter_expression` scoped to today's expected arrival
-window instead, with the same orchestration-timing caveat.
+frequency) and "stale metadata" (a catalog says "daily refresh" but the job
+now runs weekly) - set `max_age_hours` to what the catalog *declares*, and
+a failure here is exactly the gap between the declared metadata and reality;
+for "late-arriving data past an SLA cutoff," pair `row_count` (`min: 1`)
+with `filter_expression` scoped to today's expected arrival window instead,
+with the same orchestration-timing caveat.
 
 **`monotonicity`** - `column` must never decrease when rows are ordered by
 `order_by`. Optionally scoped to `columns` (checked separately within each
@@ -890,7 +903,7 @@ today's own numbers. The CLI does this automatically from `--results-table`.
 
 ### What's still out of scope, on purpose
 
-Two things a first gap-analysis pass flagged are *not* implemented here -
+A few things the gap-analysis passes flagged are *not* implemented here -
 not because they're hard to code, but because they're not this library's
 job. This framework only ever runs against a DataFrame that already exists;
 it cannot detect a file that never arrived, or reject a malformed file
@@ -901,6 +914,22 @@ platform features this library's results table and
 Likewise, CI/CD change-management gating is an orchestration/pipeline
 concern - the `tests/` suite here is the regression asset such a gate would
 run, not something this library runs itself.
+
+Metadata and governance concerns split the same way: "broken/missing
+lineage" (tracing a field back to its source system) and
+"ownership/stewardship gaps" (no identified data owner) are Unity Catalog's
+job - lineage graphs and ownership tags, not data values, and this library
+never touches either. "Missing/incorrect data dictionary" and "undocumented
+transformation logic" are documentation-practice problems - no check over a
+DataFrame's *values* can verify that a column's *documented meaning*
+matches its content, or that the code that produced it has comments. What
+this library *can* do, and does: `schema` makes the structural half of a
+data dictionary (names, types) enforceable as code, `derived_field` makes a
+KPI's calculation formula explicit and traceable instead of buried in a
+notebook, and `expression` enforces one agreed business definition (e.g.
+"active customer") consistently once a team has actually agreed on it -
+resolving the disagreement itself is still a governance conversation, not
+something a check can settle.
 
 ---
 
