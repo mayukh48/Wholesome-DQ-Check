@@ -143,6 +143,9 @@ Catches: a NULL that was silently replaced with a placeholder before it
 ever reached this table - `0`, `"N/A"`, `"9999-12-31"`, etc. - which
 `completeness` can't see, because the value genuinely isn't null. A real
 `NULL` still passes this check; that's `completeness`'s job, not this one's.
+Equally catches "incorrect null handling in transformations" - a
+`COALESCE(amount, 0)` inside the pipeline itself masking a real missing
+value the exact same way a source system's placeholder would.
 
 **`coverage`** - every key in a reference dataset must appear at least once
 in this dataset. The reverse direction of `referential_integrity`.
@@ -211,12 +214,17 @@ space issues" - `" John "` and `"John"` otherwise compare as distinct keys,
 silently hiding a real duplicate from detection.
 
 Run against the "one" side of a join *before* that join happens, this is
-also the root-cause fix for "fan-out/fan-in errors in joins": unintended
-row multiplication (or loss) from an unexpectedly non-unique join key. A
-`uniqueness` check on `customers.customer_id` prevents the surprise;
-`reconciliation` (Consistency, below) on the joined output's row count
-catches it after the fact if it happens anyway - the two are complementary,
-not alternatives.
+also the root-cause fix for "fan-out/fan-in errors in joins" and "join key
+mismatch during transformation" (a type/format mismatch silently dropping
+rows): unintended row multiplication (or loss) from an unexpectedly
+non-unique or mismatched join key. A `uniqueness` check on
+`customers.customer_id` prevents the surprise; `reconciliation`
+(Consistency, below) on the joined output's row count catches it after the
+fact if it happens anyway - the two are complementary, not alternatives.
+Applied to a natural event key, `uniqueness` also catches "duplicate
+events" from a "watermark/checkpoint error" in a streaming pipeline
+re-processing what it already saw, and the duplicate-row symptom of a
+"race condition" in concurrent writers.
 
 **`fuzzy_duplicate`** - flags rows whose `column` is a near-match (edit
 distance ≤ `max_edit_distance`, default 2) of another row's, not just an
@@ -425,7 +433,10 @@ Catches: "schema drift," "data type drift," and "metadata schema mismatch"
 schema that no longer matches the actual table - which doubles as a
 "versioning issues" alarm: a schema check that starts failing *is* the
 detection that the schema changed without whatever version control was
-supposed to be tracking it. Set `strict: true` to also catch "unexpected/
+supposed to be tracking it. The same mechanism is the direct fix for
+"API/data contract breaking changes" - an upstream API changing its
+response structure without a version bump lands here exactly like a schema
+change from any other source. Set `strict: true` to also catch "unexpected/
 extra columns" - a new, unmapped column quietly showing up in the feed -
 which isn't a failure by default (an unlisted column existing isn't
 inherently wrong). Set `enforce_order: true` to also catch "column order
@@ -471,7 +482,11 @@ and "broken referential integrity after deletes" (the parent row was
 removed, leaving a dangling reference) - all the same mechanism, whichever
 way the orphan came to exist. `ref_dfs` doesn't care what catalog or
 database a DataFrame was read from, so this also covers "cross-database
-referential mismatch" without any special handling.
+referential mismatch" without any special handling. Pointed at a *live
+extract of the current source* instead of a static master table, it's also
+the fix for "incorrect incremental/CDC logic" missing deletes: a target-
+table key that no longer exists in the source is exactly a delete that
+never propagated.
 
 **`no_circular_reference`** - following `parent_column` from any row in
 `column` must never lead back to that same row, within `max_depth` hops
@@ -522,7 +537,14 @@ Catches: "depot mapped to the wrong state" - the depot is a valid depot, it's
 just linked to the wrong state. Also covers "wrong data source mapped" and
 "incorrect classification" - anywhere a value was populated from the wrong
 place - and, pointed at an FX-rate reference table, "using a stale exchange
-rate for a currency conversion."
+rate for a currency conversion." Pointed at a live source extract instead
+of a static master (same trick as `referential_integrity`, above), this is
+also the fix for "incorrect CDC logic" missing *updates* - a target row
+whose value still disagrees with the source's current value is a change
+that never propagated. With `abs_tolerance` set tight (see below), it's
+also a blunt but effective "timezone conversion error" detector: a
+timestamp that's off by a clean multiple of an hour from a trusted
+reference will blow well past any reasonable tolerance.
 
 Set `value_map` when the two systems use different code schemes for the
 same fact:
@@ -647,7 +669,14 @@ vs. silver, silver vs. gold, one `reconciliation` check per hop) this is
 also the direct fix for "reconciliation break between layers" not tying
 out, and pointed at a pre- vs. post-transformation dataset, for "data loss
 during transformation" (a filter/dedup step unintentionally dropping valid
-rows) or "data loss during transmission" (a truncated file transfer).
+rows) or "data loss during transmission" (a truncated file transfer). The
+same pre/post comparison also catches "job failure/partial execution" (the
+pipeline died midway, leaving the target short), "resource/timeout-induced
+truncation" (a job timed out and wrote partial output without failing
+loudly), a "watermark/checkpoint error" dropping streamed events, and
+"non-idempotent pipeline reruns" duplicating rows when `ref_dataset` points
+at an already-loaded marker (as above) - all different root causes, same
+row-count symptom.
 
 **`cross_dataset_consistency`** - a summed column, grouped by one or more
 dimensions, must match a reference dataset per group.
@@ -685,7 +714,12 @@ change and are excluded by `filter_expression`, so they never trip this.
 Applied to a reference/lookup table, it's also a "versioning issues" alarm
 for data that isn't under formal SCD Type 2 control (see `scd_overlap`,
 above, for tables that are): any unexpected change gets flagged even
-without a version history to check against.
+without a version history to check against. The same mechanism catches
+"backfill errors" too - historical reprocessing silently applying today's
+logic (a changed tax rate, a redefined category) to past data instead of
+the rule that was actually in force at the time. This can't tell you
+*whether* the backfill was correct, only that history changed at all -
+which is exactly the signal worth having.
 
 **`scd_overlap`** - no two rows for the same entity (`columns`) may have
 overlapping `[start_column, end_column)` validity windows. A `NULL`
@@ -972,6 +1006,23 @@ weak proxy at best, not a real audit trail. What this library *can* do:
 `pii_exposure` (Validity, above) detects a PII-shaped value sitting
 unmasked in a column - the part of "PII exposed" and "improper masking"
 that actually shows up in the data itself.
+
+Two pipeline-engineering concerns land in the same bucket. "Configuration
+drift between environments" (Dev/QA/Prod pipeline configs differing) is
+environment/config management - comparing job cluster settings, env vars,
+or library versions across workspaces, none of which shows up in a
+DataFrame's values. "Improper error handling / swallowed exceptions"
+(errors caught but never logged) is a code-quality and observability
+practice, not a data check either - though it's worth noting this
+library's own operating model (`write_results()` records every check's
+outcome, `raise_on_critical_failures()` fails loudly) is deliberately the
+opposite pattern for the DQ checks it runs, even though it can't fix
+exception handling elsewhere in a pipeline's code. And "silent failures -
+transformation completes successfully with wrong output" isn't a gap with
+one missing check type at all: it's the general problem this whole
+framework exists to catch. Every check type here is a different way of
+proving a transformation's output is what it should have been, not just
+that it ran without an exception.
 
 ---
 
