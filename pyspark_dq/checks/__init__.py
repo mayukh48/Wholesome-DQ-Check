@@ -35,6 +35,7 @@ from . import (
     no_circular_reference,
     outlier,
     period_gap,
+    pii_exposure,
     range as range_check,
     reconciliation,
     referential_integrity,
@@ -64,6 +65,7 @@ ROW_LEVEL_CHECKS = {
     "castable": castable,
     "length": length,
     "monotonicity": monotonicity,
+    "pii_exposure": pii_exposure,
 }
 
 # check.type -> module exposing evaluate(check, df, **kwargs) -> CheckOutcome.
@@ -117,6 +119,7 @@ __all__ = [
     "no_circular_reference",
     "outlier",
     "period_gap",
+    "pii_exposure",
     "reconciliation",
     "referential_integrity",
     "row_count",

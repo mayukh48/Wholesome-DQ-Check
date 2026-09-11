@@ -3,11 +3,12 @@ reconciliation, cross_dataset_consistency, anomaly, expression, accuracy,
 immutability, coverage, period_gap, sentinel_value, stale_record,
 derived_field, outlier, scd_overlap, uniform_value, castable, length,
 fuzzy_duplicate, cross_source_duplicate, monotonicity,
-no_circular_reference, format_consistency, distribution_shift, and
-correlation_shift - plus the generic filter_expression scoping feature,
-completeness's treat_blank_as_null, accuracy's value_map/abs_tolerance,
-schema's strict/enforce_order, length's array/map size support,
-uniqueness's trim_whitespace, and anomaly's metric/seasonal_period."""
+no_circular_reference, format_consistency, distribution_shift,
+correlation_shift, and pii_exposure - plus the generic filter_expression
+scoping feature, completeness's treat_blank_as_null, accuracy's
+value_map/abs_tolerance, schema's strict/enforce_order, length's array/map
+size support, uniqueness's trim_whitespace, and anomaly's
+metric/seasonal_period."""
 import json
 from datetime import date, datetime, timedelta, timezone
 
@@ -1166,5 +1167,31 @@ def test_correlation_shift_passes_with_no_history(spark):
         name="corr_check", type="correlation_shift", column="feature", match_column="target"
     )
     result = _run(spark, df, check, history_df=None)
+
+    assert result["status"] == "PASS"
+
+
+def test_pii_exposure_flags_unmasked_ssn(spark):
+    df = spark.createDataFrame([(1, "123-45-6789"), (2, "***-**-6789")], ["id", "ssn"])
+    check = CheckDefinition(
+        name="ssn_not_exposed",
+        type="pii_exposure",
+        column="ssn",
+        pattern=r"^\d{3}-\d{2}-\d{4}$",
+        threshold=1.0,
+    )
+    result = _run(spark, df, check)
+
+    assert result["status"] == "FAIL"
+    assert result["failed_rows"] == 1  # the unmasked "123-45-6789"
+    assert result["total_rows"] == 2
+
+
+def test_pii_exposure_passes_when_fully_masked(spark):
+    df = spark.createDataFrame([(1, "***-**-6789"), (2, "***-**-1234")], ["id", "ssn"])
+    check = CheckDefinition(
+        name="ssn_not_exposed", type="pii_exposure", column="ssn", pattern=r"^\d{3}-\d{2}-\d{4}$"
+    )
+    result = _run(spark, df, check)
 
     assert result["status"] == "PASS"

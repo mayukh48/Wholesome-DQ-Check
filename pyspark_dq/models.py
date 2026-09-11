@@ -39,6 +39,7 @@ VALID_CHECK_TYPES = (
     "format_consistency",
     "distribution_shift",
     "correlation_shift",
+    "pii_exposure",
 )
 
 

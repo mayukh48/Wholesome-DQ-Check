@@ -7,11 +7,11 @@
 # a different coding scheme, make sure this customer's SCD Type 2 version
 # history never has two overlapping "current" rows, catch the same person
 # recorded twice under a slightly different spelling of their name, confirm
-# this system's clock hasn't drifted too far from the CRM's, and make sure
-# the referral chain (who referred whom) never loops back on itself. Some
-# checks are "warning" severity - they get recorded and are visible on a
-# dashboard, but a small rate of bad values won't halt the pipeline;
-# "critical" checks will.
+# this system's clock hasn't drifted too far from the CRM's, make sure the
+# referral chain (who referred whom) never loops back on itself, and make
+# sure no SSN is sitting around unmasked. Some checks are "warning"
+# severity - they get recorded and are visible on a dashboard, but a small
+# rate of bad values won't halt the pipeline; "critical" checks will.
 
 dataset: customers
 layer: silver
@@ -159,3 +159,17 @@ checks:
     # data error, or a bad merge of two records) B ends up listed as having
     # referred A. A direct self-reference (a customer "referred by" themselves)
     # is caught the same way, as the simplest possible cycle.
+
+  - name: ssn_not_exposed_unmasked
+    type: pii_exposure
+    column: ssn
+    pattern: '^\d{3}-\d{2}-\d{4}$'   # the *raw*, unmasked shape - flags any row that still looks like this
+    severity: critical
+    threshold: 1.0
+    # Catches "PII exposed in non-secure fields": a Social Security Number
+    # that should have been masked (e.g. to "***-**-6789") but wasn't. This
+    # can only see what's IN the data - it has no visibility into whether
+    # this table is properly access-controlled (that's a Unity Catalog
+    # grants question) or whether the masking routine that produced the
+    # masked values is cryptographically reversible (a code review
+    # question), only whether an unmasked value is still sitting here.

@@ -354,6 +354,29 @@ bytes producing garbled/mojibake text - and "special character handling"
 issues, e.g. a pattern like `'^[^\t\n\r"]*$'` to reject unescaped tabs,
 newlines, or quotes within a field.
 
+**`pii_exposure`** - `column`'s non-null values must **not** match
+`pattern` - the inverse of `regex`. `regex` validates *toward* a pattern
+(the value should look like an email); this validates *away from* one (the
+value should not look like an unmasked SSN).
+
+```yaml
+- name: ssn_not_exposed_unmasked
+  type: pii_exposure
+  column: ssn
+  pattern: '^\d{3}-\d{2}-\d{4}$'   # the raw, unmasked shape
+  severity: critical
+  threshold: 1.0
+```
+Catches "PII/PHI exposed in non-secure fields" - a Social Security Number
+sitting in plain text where it should have been masked - and, paired with a
+`regex` check validating the *masked* pattern, "improper masking" that left
+some rows untouched. It can only see what's *in* the data: whether the
+table is properly access-controlled (a Unity Catalog grants question) or
+whether the masking algorithm producing the masked values is
+cryptographically reversible (a code/algorithm review) are both invisible
+to a data-value check - see ["What's still out of scope, on
+purpose"](#whats-still-out-of-scope-on-purpose).
+
 **`format_consistency`** - `column`'s non-null values should all use the
 same one of several possible representations, without needing to know
 upfront which one is "correct." `format_patterns` is a list of regex
@@ -423,7 +446,9 @@ open-ended escape hatch for business rules that don't fit another type.
 Catches: e.g. a market-share report accidentally including last month's
 rows, or a same-row ordering rule like `ship_date >= order_date` -
 "cross-field inconsistency" where two columns on the same row logically
-contradict each other.
+contradict each other. Also the fix for "retention policy violations":
+`expression: "created_at >= date_sub(current_date(), 2555)"` flags any row
+older than a 7-year retention limit that should have been purged.
 
 ### Accuracy — values correctly reflect reality
 
@@ -931,6 +956,23 @@ notebook, and `expression` enforces one agreed business definition (e.g.
 resolving the disagreement itself is still a governance conversation, not
 something a check can settle.
 
+Security and compliance concerns split the same way. "Access control
+mismatch" (sensitive data reachable by an unauthorized role), "consent/data
+usage violations" (data used beyond its consented purpose), and
+"cross-border data residency issues" (data replicated to the wrong region)
+have no signature in the data's *values* at all - they're about who can
+query a table, what a customer agreed to, and where bytes physically live,
+answered by Unity Catalog grants, an external consent system, and cloud
+storage configuration respectively, never by this library. "Audit trail
+gaps" (changes to sensitive data not logged) needs the *change history* of
+a table - Delta's transaction log or Unity Catalog's audit log - not a
+single DataFrame snapshot, which is all any check here ever sees; populated
+`modified_by`/`modified_at` columns (checkable with `completeness`) are a
+weak proxy at best, not a real audit trail. What this library *can* do:
+`pii_exposure` (Validity, above) detects a PII-shaped value sitting
+unmasked in a column - the part of "PII exposed" and "improper masking"
+that actually shows up in the data itself.
+
 ---
 
 ## Full `CheckDefinition` field reference
@@ -941,10 +983,10 @@ it above; unused fields are just left `None`.
 | Field | Type | Used by |
 |---|---|---|
 | `name` | str (required) | all - must be unique within a config |
-| `type` | str (required) | all - one of the 32 types above |
+| `type` | str (required) | all - one of the 33 types above |
 | `severity` | `"critical"` \| `"warning"` (default `"warning"`) | all |
 | `threshold` | float 0.0-1.0 (default `1.0`) | all |
-| `column` | str | completeness, sentinel_value, coverage, period_gap, stale_record, derived_field, outlier, uniform_value, castable, length, fuzzy_duplicate, cross_source_duplicate, monotonicity, no_circular_reference, format_consistency, distribution_shift, correlation_shift, uniqueness, range, value_set, regex, referential_integrity, accuracy, reconciliation, cross_dataset_consistency, anomaly |
+| `column` | str | completeness, sentinel_value, coverage, period_gap, stale_record, derived_field, outlier, uniform_value, castable, length, fuzzy_duplicate, cross_source_duplicate, monotonicity, no_circular_reference, format_consistency, distribution_shift, correlation_shift, pii_exposure, uniqueness, range, value_set, regex, referential_integrity, accuracy, reconciliation, cross_dataset_consistency, anomaly |
 | `metric` | `"sum"` \| `"count"` \| `"null_rate"` \| `"distinct_count"` | anomaly (default: `sum` if `column` set, else `count`) |
 | `seasonal_period` | `"month"` \| `"day_of_week"` \| `"day_of_month"` | anomaly (optional - baseline is calendar-aligned instead of just "the last N runs") |
 | `columns` | list[str] | uniqueness (composite key), cross_dataset_consistency (group-by), immutability (fingerprint columns), scd_overlap (entity key), fuzzy_duplicate (optional blocking key), monotonicity (optional partition key) |
@@ -964,7 +1006,7 @@ it above; unused fields are just left `None`.
 | `target_type` | str | castable (a Spark SQL type name, e.g. `date`, `double`, `timestamp`) |
 | `min` / `max` | float | range, row_count, length (character count for a string column, element count for an array/map column) |
 | `allowed_values` | list | value_set, uniform_value (optional - a single value to pin the expected baseline) |
-| `pattern` | str | regex |
+| `pattern` | str | regex, pii_exposure |
 | `expression` | str | expression, derived_field (the formula `column` should equal) |
 | `ref_dataset` | str | referential_integrity, accuracy, reconciliation, cross_dataset_consistency, coverage, cross_source_duplicate |
 | `ref_column` | str | referential_integrity (required), coverage (required), cross_source_duplicate (required), accuracy (optional, defaults to `column`) |
@@ -1154,7 +1196,7 @@ import pytest
 pytest.main(["-v", f"{PKG_ROOT}/tests/test_checks.py"])
 ```
 
-This has been run end-to-end on this workspace's serverless compute (71/71
+This has been run end-to-end on this workspace's serverless compute (73/73
 passing, covering every check type added on top of the original nine plus
 `filter_expression` and `treat_blank_as_null`). The `spark` fixture in
 `tests/conftest.py` detects when it's running inside
@@ -1199,6 +1241,7 @@ package - included here so they don't get rediscovered:
 | `castable` | Validity | value actually converts to a target type | | |
 | `value_set` | Validity | value in an allow-list | | |
 | `regex` | Validity | value matches a pattern | | |
+| `pii_exposure` | Validity | value does NOT match a (sensitive-shaped) pattern | | |
 | `format_consistency` | Validity | column isn't silently mixing formats | | |
 | `schema` | Validity | dtypes (and optionally column set/order) match expected | | |
 | `expression` | Validity | arbitrary SQL predicate, per row | | |
