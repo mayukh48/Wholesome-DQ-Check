@@ -3,10 +3,12 @@ reconciliation, cross_dataset_consistency, anomaly, expression, accuracy,
 immutability, coverage, period_gap, sentinel_value, stale_record,
 derived_field, outlier, scd_overlap, uniform_value, castable, length,
 fuzzy_duplicate, cross_source_duplicate, monotonicity,
-no_circular_reference, and format_consistency - plus the generic
-filter_expression scoping feature, completeness's treat_blank_as_null,
-accuracy's value_map/abs_tolerance, schema's strict/enforce_order,
-length's array/map size support, and uniqueness's trim_whitespace."""
+no_circular_reference, format_consistency, distribution_shift, and
+correlation_shift - plus the generic filter_expression scoping feature,
+completeness's treat_blank_as_null, accuracy's value_map/abs_tolerance,
+schema's strict/enforce_order, length's array/map size support,
+uniqueness's trim_whitespace, and anomaly's metric/seasonal_period."""
+import json
 from datetime import date, datetime, timedelta, timezone
 
 from pyspark_dq.engine import DQEngine
@@ -1016,3 +1018,153 @@ def test_uniqueness_without_trim_whitespace_misses_the_duplicate(spark):
     result = _run(spark, df, check)
 
     assert result["status"] == "PASS"  # without trimming, " John " and "John" look like different keys
+
+
+def test_anomaly_metric_null_rate_flags_a_spike(spark):
+    df = spark.createDataFrame([(1, None), (2, None), (3, "x"), (4, None), (5, None)], ["id", "val"])
+    now = datetime.now(timezone.utc)
+    history_df = spark.createDataFrame(
+        [
+            ("orders", "null_rate_check", now - timedelta(days=1), 0.01),
+            ("orders", "null_rate_check", now - timedelta(days=2), 0.01),
+        ],
+        ["dataset", "check_name", "run_timestamp", "metric_value"],
+    )
+    check = CheckDefinition(
+        name="null_rate_check", type="anomaly", column="val", metric="null_rate", max_pct_change=0.5
+    )
+    result = _run(spark, df, check, history_df=history_df)
+
+    assert result["status"] == "FAIL"
+    assert abs(result["metric_value"] - 0.8) < 1e-9  # 4 of 5 rows are null
+
+
+def test_anomaly_metric_distinct_count_flags_cardinality_change(spark):
+    df = spark.createDataFrame([(i, f"cat{i}") for i in range(20)], ["id", "category"])
+    now = datetime.now(timezone.utc)
+    history_df = spark.createDataFrame(
+        [("orders", "cardinality_check", now - timedelta(days=1), 5.0)],
+        ["dataset", "check_name", "run_timestamp", "metric_value"],
+    )
+    check = CheckDefinition(
+        name="cardinality_check",
+        type="anomaly",
+        column="category",
+        metric="distinct_count",
+        max_pct_change=0.5,
+    )
+    result = _run(spark, df, check, history_df=history_df)
+
+    assert result["status"] == "FAIL"
+    assert result["metric_value"] == 20.0
+
+
+def test_anomaly_seasonal_period_compares_same_month_only(spark):
+    now = datetime.now(timezone.utc)
+    same_month_last_year = now.replace(year=now.year - 1, day=1)
+    different_month = now.replace(month=(now.month % 12) + 1, day=1)
+    history_df = spark.createDataFrame(
+        [
+            ("orders", "seasonal_check", same_month_last_year, 100.0),
+            ("orders", "seasonal_check", different_month, 9999.0),  # must be excluded from the baseline
+        ],
+        ["dataset", "check_name", "run_timestamp", "metric_value"],
+    )
+    df = spark.createDataFrame([(i,) for i in range(105)], ["id"])  # close to the same-month baseline of 100
+    check = CheckDefinition(name="seasonal_check", type="anomaly", seasonal_period="month", max_pct_change=0.2)
+    result = _run(spark, df, check, history_df=history_df)
+
+    assert result["status"] == "PASS"
+
+
+def test_distribution_shift_flags_a_category_shift(spark):
+    df = spark.createDataFrame([("A",)] * 95 + [("B",)] * 5, ["status"])  # A=95%, B=5%
+    now = datetime.now(timezone.utc)
+    baseline_dist = json.dumps({"A": 0.5, "B": 0.5})
+    history_df = spark.createDataFrame(
+        [("orders", "status_distribution_stable", now - timedelta(days=1), baseline_dist)],
+        ["dataset", "check_name", "run_timestamp", "metric_text"],
+    )
+    check = CheckDefinition(
+        name="status_distribution_stable", type="distribution_shift", column="status", max_pct_change=0.1
+    )
+    result = _run(spark, df, check, history_df=history_df)
+
+    assert result["status"] == "FAIL"
+
+
+def test_distribution_shift_passes_when_stable(spark):
+    df = spark.createDataFrame([("A",)] * 50 + [("B",)] * 50, ["status"])
+    now = datetime.now(timezone.utc)
+    baseline_dist = json.dumps({"A": 0.5, "B": 0.5})
+    history_df = spark.createDataFrame(
+        [("orders", "status_distribution_stable", now - timedelta(days=1), baseline_dist)],
+        ["dataset", "check_name", "run_timestamp", "metric_text"],
+    )
+    check = CheckDefinition(
+        name="status_distribution_stable", type="distribution_shift", column="status", max_pct_change=0.1
+    )
+    result = _run(spark, df, check, history_df=history_df)
+
+    assert result["status"] == "PASS"
+
+
+def test_distribution_shift_passes_with_no_history(spark):
+    df = spark.createDataFrame([("A",), ("B",)], ["status"])
+    check = CheckDefinition(name="status_distribution_stable", type="distribution_shift", column="status")
+    result = _run(spark, df, check, history_df=None)
+
+    assert result["status"] == "PASS"
+    assert result["metric_text"] is not None
+
+
+def test_correlation_shift_flags_a_broken_correlation(spark):
+    df = spark.createDataFrame(
+        [(1.0, 10.0), (2.0, 5.0), (3.0, 1.0), (4.0, -3.0)], ["feature", "target"]
+    )  # strongly negatively correlated now
+    now = datetime.now(timezone.utc)
+    history_df = spark.createDataFrame(
+        [("orders", "feature_target_correlation_stable", now - timedelta(days=1), 0.95)],
+        ["dataset", "check_name", "run_timestamp", "metric_value"],
+    )
+    check = CheckDefinition(
+        name="feature_target_correlation_stable",
+        type="correlation_shift",
+        column="feature",
+        match_column="target",
+        abs_tolerance=0.3,
+    )
+    result = _run(spark, df, check, history_df=history_df)
+
+    assert result["status"] == "FAIL"
+
+
+def test_correlation_shift_passes_when_stable(spark):
+    df = spark.createDataFrame(
+        [(1.0, 1.1), (2.0, 2.2), (3.0, 2.9), (4.0, 4.3)], ["feature", "target"]
+    )  # strongly positively correlated, matching the baseline
+    now = datetime.now(timezone.utc)
+    history_df = spark.createDataFrame(
+        [("orders", "feature_target_correlation_stable", now - timedelta(days=1), 0.95)],
+        ["dataset", "check_name", "run_timestamp", "metric_value"],
+    )
+    check = CheckDefinition(
+        name="feature_target_correlation_stable",
+        type="correlation_shift",
+        column="feature",
+        match_column="target",
+        abs_tolerance=0.3,
+    )
+    result = _run(spark, df, check, history_df=history_df)
+
+    assert result["status"] == "PASS"
+
+
+def test_correlation_shift_passes_with_no_history(spark):
+    df = spark.createDataFrame([(1.0, 1.0), (2.0, 2.0)], ["feature", "target"])
+    check = CheckDefinition(
+        name="corr_check", type="correlation_shift", column="feature", match_column="target"
+    )
+    result = _run(spark, df, check, history_df=None)
+
+    assert result["status"] == "PASS"

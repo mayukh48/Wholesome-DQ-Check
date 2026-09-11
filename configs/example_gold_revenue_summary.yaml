@@ -2,8 +2,10 @@
 # Gold is business-facing aggregated data, so checks focus on things that
 # would embarrass the business if wrong: no gaps in the summary, no negative
 # revenue, the report isn't stale (i.e. yesterday's aggregation actually ran),
-# revenue hasn't unexpectedly swung vs. recent history, region totals still
-# tie back to the raw orders feed, and only current-month data is included.
+# revenue hasn't unexpectedly swung vs. recent history (including against
+# the same season last year) or stopped tracking order volume the way it
+# always has, region totals still tie back to the raw orders feed and haven't
+# quietly become imbalanced, and only current-month data is included.
 
 dataset: revenue_summary
 layer: gold
@@ -71,3 +73,49 @@ checks:
     frequency: month     # one of day / month / year
     severity: critical    # a hole in a revenue trend is exactly what would embarrass the business
     threshold: 1.0
+
+  - name: region_mix_is_stable
+    type: distribution_shift
+    column: region
+    max_pct_change: 0.1     # no region's share of total rows should move more than 10 points run-over-run
+    severity: warning
+    threshold: 1.0
+    # Catches "unexpected distribution shift" and "skewed/imbalanced data" -
+    # e.g. one region unexpectedly coming to dominate 99% of records. Unlike
+    # anomaly (a single number across runs), this compares the whole
+    # category mix, and stores it as JSON in metric_text for next time.
+
+  - name: revenue_null_rate_is_stable
+    type: anomaly
+    column: total_revenue
+    metric: null_rate            # instead of the default sum/count
+    max_pct_change: 5.0             # null rate can jump a lot in relative terms and still be tiny in absolute terms
+    severity: warning
+    # Catches "anomalous null rate spike" - e.g. a field's null percentage
+    # jumping from 1% to 40% because an upstream join silently started
+    # missing matches.
+
+  - name: revenue_matches_seasonal_pattern
+    type: anomaly
+    column: total_revenue
+    seasonal_period: month    # compare against the same calendar month in prior years, not just recent runs
+    max_pct_change: 0.3
+    lookback: 3                 # average of the last 3 same-month runs (e.g. the last 3 Decembers)
+    severity: warning
+    # Catches "seasonal pattern break" - an expected holiday-season spike
+    # that didn't happen. A plain anomaly check comparing against the last
+    # few runs would just see "normal for last month" and miss this
+    # entirely, since last month wasn't the holiday season.
+
+  - name: revenue_still_tracks_order_volume
+    type: correlation_shift
+    column: total_revenue
+    match_column: order_count     # the other metric this should stay correlated with
+    abs_tolerance: 0.3
+    lookback: 7
+    severity: warning
+    # Catches "correlation break": revenue and order volume have always
+    # moved together, and suddenly stop - a sign something upstream changed
+    # (a pricing bug, a broken join, a new low-value bulk order channel).
+    # Also the fix for "concept drift" in an ML-consuming pipeline, pointed
+    # at a feature/target pair instead.

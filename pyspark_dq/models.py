@@ -37,6 +37,8 @@ VALID_CHECK_TYPES = (
     "monotonicity",
     "no_circular_reference",
     "format_consistency",
+    "distribution_shift",
+    "correlation_shift",
 )
 
 
@@ -80,6 +82,8 @@ class CheckDefinition:
     enforce_order: Optional[bool] = None
     format_patterns: Optional[List[str]] = None
     trim_whitespace: Optional[bool] = None
+    metric: Optional[str] = None
+    seasonal_period: Optional[str] = None
 
     def __post_init__(self) -> None:
         if self.type not in VALID_CHECK_TYPES:

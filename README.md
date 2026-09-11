@@ -752,6 +752,80 @@ fails a `reconciliation` check against a specific reference count. Passes
 automatically until enough run history has accumulated - a brand-new
 dataset never false-fails on day one.
 
+Set `metric` to track something other than sum/count:
+
+```yaml
+- name: revenue_null_rate_is_stable
+  type: anomaly
+  column: total_revenue
+  metric: null_rate      # or "distinct_count"; defaults to "sum" (column set) or "count" (column omitted)
+  max_pct_change: 5.0
+  severity: warning
+```
+`metric: null_rate` (fraction of `column` that's null) catches "anomalous
+null rate spike" - a field's null percentage jumping from 1% to 40%.
+`metric: distinct_count` catches "cardinality anomaly" - a categorical
+column's unique-value count changing abruptly.
+
+Set `seasonal_period` (`"month"`, `"day_of_week"`, or `"day_of_month"`) to
+compare against the same calendar period in history instead of just the
+most recent runs:
+
+```yaml
+- name: revenue_matches_seasonal_pattern
+  type: anomaly
+  column: total_revenue
+  seasonal_period: month   # compare against the same month in prior years
+  lookback: 3                # average of the last 3 same-month runs
+  max_pct_change: 0.3
+  severity: warning
+```
+Catches "seasonal pattern break" - an expected holiday spike that didn't
+happen. Without `seasonal_period`, the baseline is the average of the last
+`lookback` runs regardless of when they fell, which would just see "normal
+for last month" and miss a break in a pattern that only recurs annually.
+
+**`distribution_shift`** - the proportion of each value in a categorical
+`column` should stay close to the distribution recorded for this check in
+the last run. `max_pct_change` (reused from `anomaly`, default 0.1) bounds
+the largest allowed shift in any one category's share.
+
+```yaml
+- name: region_mix_is_stable
+  type: distribution_shift
+  column: region
+  max_pct_change: 0.1
+  severity: warning
+```
+Catches "unexpected distribution shift (data drift)" - category proportions
+moving drastically vs. the historical baseline - and "skewed/imbalanced
+data" - one category unexpectedly coming to dominate 99% of records. Unlike
+`anomaly`, which tracks one number across runs, this compares an entire
+category mix; it stores today's distribution as JSON in `metric_text` so
+the next run has something to compare against, and passes automatically
+until there's a prior distribution recorded.
+
+**`correlation_shift`** - the Pearson correlation between `column` and
+`match_column` should stay close to the average correlation recorded for
+this check over the last `lookback` runs. Uses `abs_tolerance` (default
+0.2) rather than a percentage change, since correlation is bounded to
+[-1, 1] and can cross zero, where a percentage change is meaningless.
+
+```yaml
+- name: revenue_still_tracks_order_volume
+  type: correlation_shift
+  column: total_revenue
+  match_column: order_count
+  abs_tolerance: 0.3
+  lookback: 7
+  severity: warning
+```
+Catches "correlation break" - two historically correlated metrics suddenly
+diverging - and, pointed at a feature/target pair in an ML-consuming
+pipeline, "concept drift" (the relationship between them changing over
+time). Passes automatically until there's a baseline to compare against,
+same as `anomaly`.
+
 ---
 
 ## Cross-cutting features
@@ -838,10 +912,12 @@ it above; unused fields are just left `None`.
 | Field | Type | Used by |
 |---|---|---|
 | `name` | str (required) | all - must be unique within a config |
-| `type` | str (required) | all - one of the 30 types above |
+| `type` | str (required) | all - one of the 32 types above |
 | `severity` | `"critical"` \| `"warning"` (default `"warning"`) | all |
 | `threshold` | float 0.0-1.0 (default `1.0`) | all |
-| `column` | str | completeness, sentinel_value, coverage, period_gap, stale_record, derived_field, outlier, uniform_value, castable, length, fuzzy_duplicate, cross_source_duplicate, monotonicity, no_circular_reference, format_consistency, uniqueness, range, value_set, regex, referential_integrity, accuracy, reconciliation, cross_dataset_consistency, anomaly |
+| `column` | str | completeness, sentinel_value, coverage, period_gap, stale_record, derived_field, outlier, uniform_value, castable, length, fuzzy_duplicate, cross_source_duplicate, monotonicity, no_circular_reference, format_consistency, distribution_shift, correlation_shift, uniqueness, range, value_set, regex, referential_integrity, accuracy, reconciliation, cross_dataset_consistency, anomaly |
+| `metric` | `"sum"` \| `"count"` \| `"null_rate"` \| `"distinct_count"` | anomaly (default: `sum` if `column` set, else `count`) |
+| `seasonal_period` | `"month"` \| `"day_of_week"` \| `"day_of_month"` | anomaly (optional - baseline is calendar-aligned instead of just "the last N runs") |
 | `columns` | list[str] | uniqueness (composite key), cross_dataset_consistency (group-by), immutability (fingerprint columns), scd_overlap (entity key), fuzzy_duplicate (optional blocking key), monotonicity (optional partition key) |
 | `order_by` | str | monotonicity (required - the column defining arrival order) |
 | `parent_column` | str | no_circular_reference (required) |
@@ -852,7 +928,7 @@ it above; unused fields are just left `None`.
 | `treat_blank_as_null` | bool (default `false`) | completeness |
 | `disallowed_values` | list | sentinel_value |
 | `frequency` | `"day"` \| `"month"` \| `"year"` (default `"day"`) | period_gap |
-| `abs_tolerance` | float ≥ 0 (default `0.0`) | derived_field, accuracy (optional - switches from exact match to a tolerance comparison) |
+| `abs_tolerance` | float ≥ 0 (default `0.0`) | derived_field, accuracy (optional - switches from exact match to a tolerance comparison), correlation_shift (default `0.2`) |
 | `num_std_dev` | float > 0 (default `3.0`) | outlier |
 | `start_column` / `end_column` | str | scd_overlap (both required; `end_column` may be `NULL` per row = "still current") |
 | `value_map` | dict | accuracy (translates this side's raw value before comparing) |
@@ -863,14 +939,14 @@ it above; unused fields are just left `None`.
 | `expression` | str | expression, derived_field (the formula `column` should equal) |
 | `ref_dataset` | str | referential_integrity, accuracy, reconciliation, cross_dataset_consistency, coverage, cross_source_duplicate |
 | `ref_column` | str | referential_integrity (required), coverage (required), cross_source_duplicate (required), accuracy (optional, defaults to `column`) |
-| `match_column` / `ref_match_column` | str | accuracy (`ref_match_column` optional, defaults to `match_column`) |
+| `match_column` / `ref_match_column` | str | accuracy (`ref_match_column` optional, defaults to `match_column`); `match_column` also required by correlation_shift (the other column to correlate against) |
 | `max_age_hours` | float | freshness, stale_record |
 | `expected_schema` | dict[str, str] | schema |
 | `strict` | bool (default `false`) | schema (also fail on a column not listed in `expected_schema`) |
 | `enforce_order` | bool (default `false`) | schema (also fail if the expected columns appear out of order) |
 | `tolerance` | float ≥ 0 (default `0.0`) | cross_dataset_consistency |
-| `max_pct_change` | float ≥ 0 (default `0.5`) | anomaly |
-| `lookback` | int ≥ 1 (default `5`) | anomaly |
+| `max_pct_change` | float ≥ 0 (default `0.5`) | anomaly, distribution_shift (default `0.1`) |
+| `lookback` | int ≥ 1 (default `5`) | anomaly, correlation_shift |
 | `filter_expression` | str | any check type |
 
 ---
@@ -1049,7 +1125,7 @@ import pytest
 pytest.main(["-v", f"{PKG_ROOT}/tests/test_checks.py"])
 ```
 
-This has been run end-to-end on this workspace's serverless compute (62/62
+This has been run end-to-end on this workspace's serverless compute (71/71
 passing, covering every check type added on top of the original nine plus
 `filter_expression` and `treat_blank_as_null`). The `spark` fixture in
 `tests/conftest.py` detects when it's running inside
@@ -1111,3 +1187,5 @@ package - included here so they don't get rediscovered:
 | `freshness` | Timeliness | latest timestamp isn't stale | | |
 | `monotonicity` | Timeliness | value never decreases in arrival order | | |
 | `anomaly` | Timeliness / Volume | metric isn't a big swing vs. history | | ✅ |
+| `distribution_shift` | Timeliness / Volume | category mix isn't a big swing vs. history | | ✅ |
+| `correlation_shift` | Timeliness / Volume | two columns' correlation isn't a big swing vs. history | | ✅ |
